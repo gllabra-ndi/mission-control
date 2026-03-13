@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #0E0F11;
+    --foreground: #EEEEEE;
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    /* Linear-style smooth antialiasing */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Prevent overscroll bounce color mismatch */
+    overscroll-behavior-y: none;
+  }
+
+  /* Custom scrollbar matching Linear aesthetic */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2A2B2E;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3A3B3E;
+  }
+}
+
+@layer components {
+  /* Linear-inspired glassy card */
+  .lucid-card {
+    @apply bg-surface border border-border rounded-xl shadow-card transition-all duration-300;
+  }
+  
+  .lucid-card:hover {
+    @apply border-[#3A3B3E] shadow-[0_8px_30px_rgb(0,0,0,0.12)];
+  }
+
+  /* Interactive items (e.g., sidebar links, buttons) */
+  .lucid-interactive {
+    @apply text-text-muted hover:text-text-main hover:bg-surface-hover transition-colors duration-200 rounded-md px-3 py-2;
+  }
+}

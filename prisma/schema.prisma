@@ -1,0 +1,65 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model WeekConfig {
+  week          String @id // e.g. "2026-03-02"
+  baseTarget    Float  @default(350)
+  stretchTarget Float  @default(400)
+}
+
+model LeadConfig {
+  id       String @id @default(cuid())
+  week     String
+  leadName String
+  target   Float  @default(0)
+
+  @@unique([week, leadName])
+}
+
+model ClientConfig {
+  id         String  @id @default(cuid())
+  week       String
+  clientId   String
+  clientName String?
+  orderIndex Int     @default(0)
+  team       Int?
+  sa         String?
+  dealType   String?
+  min        Float?
+  max        Float?
+  target     Float?
+  mtHrs      Float?
+  wPlusHrs   Float?
+
+  @@unique([week, clientId])
+}
+
+model ConsultantConfig {
+  id               String @id @default(cuid())
+  week             String
+  consultantId     Int
+  maxCapacity      Float  @default(40)
+  billableCapacity Float  @default(40)
+  mtHrs            Float  @default(0)
+  wPlusHrs         Float  @default(0)
+  notes            String @default("")
+
+  @@unique([week, consultantId])
+}
+
+model CapacityGridConfig {
+  week          String   @id
+  resourcesJson String
+  rowsJson      String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
