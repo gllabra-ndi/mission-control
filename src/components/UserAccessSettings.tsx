@@ -1,19 +1,14 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { Mail, RefreshCcw, Shield, UserPlus } from "lucide-react";
-import { inviteAppUser, type AppUserRecord, type ConsultantRecord, updateAppUserRole, resendAppUserInvite } from "@/app/actions";
+import { Mail, RefreshCcw, Shield, Trash2, UserPlus } from "lucide-react";
+import { deactivateProvisionedUser, inviteAppUser, type AppUserRecord, type ConsultantRecord, updateAppUserRole, resendAppUserInvite } from "@/app/actions";
 import { APP_ROLE_ORDER, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
-
 interface UserAccessSettingsProps {
     initialUsers: AppUserRecord[];
     consultantDirectory: ConsultantRecord[];
     currentUserName: string;
     authEnabled: boolean;
-}
-
-function normalizeRosterKey(value: string) {
-    return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 export function UserAccessSettings({ initialUsers, consultantDirectory, currentUserName, authEnabled }: UserAccessSettingsProps) {
@@ -25,6 +20,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     const [feedback, setFeedback] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
+    const [actionUserId, setActionUserId] = useState<string | null>(null);
 
     const consultantDirectoryByEmail = useMemo(() => {
         const byEmail = new Map<string, ConsultantRecord>();
@@ -36,36 +32,33 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         return byEmail;
     }, [consultantDirectory]);
 
-    const consultantDirectoryByName = useMemo(() => {
-        const byName = new Map<string, ConsultantRecord>();
-        consultantDirectory.forEach((consultant) => {
-            byName.set(normalizeRosterKey(consultant.fullName), consultant);
-        });
-        return byName;
-    }, [consultantDirectory]);
-
     const rosterMatchedUsers = useMemo(() => {
         return users.filter((user) => {
+            if (String(user.status || "").toLowerCase() === "disabled") return false;
             const emailKey = String(user.email || "").trim().toLowerCase();
-            const nameKey = normalizeRosterKey(`${user.firstName} ${user.lastName}`);
-            return consultantDirectoryByEmail.has(emailKey) || consultantDirectoryByName.has(nameKey);
+            return consultantDirectoryByEmail.has(emailKey);
         });
-    }, [consultantDirectoryByEmail, consultantDirectoryByName, users]);
+    }, [consultantDirectoryByEmail, users]);
 
     const orderedUsers = useMemo(
-        () => consultantDirectory
-            .slice()
-            .sort((a, b) => a.fullName.localeCompare(b.fullName))
-            .flatMap((consultant) => {
-                const emailKey = String(consultant.email || "").trim().toLowerCase();
-                const nameKey = normalizeRosterKey(consultant.fullName);
-                const matchedUser = rosterMatchedUsers.find((user) => {
-                    const userEmailKey = String(user.email || "").trim().toLowerCase();
-                    const userNameKey = normalizeRosterKey(`${user.firstName} ${user.lastName}`);
-                    return (emailKey && userEmailKey === emailKey) || userNameKey === nameKey;
+        () => {
+            const seenEmails = new Set<string>();
+            return consultantDirectory
+                .slice()
+                .sort((a, b) => a.fullName.localeCompare(b.fullName))
+                .flatMap((consultant) => {
+                    const emailKey = String(consultant.email || "").trim().toLowerCase();
+                    const matchedUser = rosterMatchedUsers.find((user) => {
+                        const userEmailKey = String(user.email || "").trim().toLowerCase();
+                        return Boolean(emailKey) && userEmailKey === emailKey;
+                    });
+                    if (!matchedUser) return [];
+                    const matchedEmailKey = String(matchedUser.email || "").trim().toLowerCase();
+                    if (matchedEmailKey && seenEmails.has(matchedEmailKey)) return [];
+                    if (matchedEmailKey) seenEmails.add(matchedEmailKey);
+                    return [matchedUser];
                 });
-                return matchedUser ? [matchedUser] : [];
-            }),
+        },
         [consultantDirectory, rosterMatchedUsers]
     );
 
@@ -81,8 +74,9 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         setError(null);
         startTransition(async () => {
             try {
+                setActionUserId("invite:create");
                 const consultantMatch = consultantDirectoryByEmail.get(email.trim().toLowerCase())
-                    ?? consultantDirectoryByName.get(normalizeRosterKey(`${firstName} ${lastName}`));
+                    ?? null;
 
                 if (!consultantMatch) {
                     throw new Error("This person is not in Consultant Utilization yet. Add them there first.");
@@ -107,6 +101,8 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                 setFeedback(result.emailSent ? "User created and invite email sent." : `User created, but email could not be sent: ${result.emailError}`);
             } catch (nextError: any) {
                 setError(String(nextError?.message || "Could not create user."));
+            } finally {
+                setActionUserId(null);
             }
         });
     };
@@ -116,11 +112,14 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         setError(null);
         startTransition(async () => {
             try {
+                setActionUserId(userId);
                 const updated = await updateAppUserRole(userId, nextRole);
                 setUsers((prev) => prev.map((user) => (user.id === userId ? updated : user)));
                 setFeedback("Role updated.");
             } catch (nextError: any) {
                 setError(String(nextError?.message || "Could not update role."));
+            } finally {
+                setActionUserId(null);
             }
         });
     };
@@ -130,11 +129,31 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         setError(null);
         startTransition(async () => {
             try {
+                setActionUserId(userId);
                 const result = await resendAppUserInvite(userId, currentUserName);
                 setUsers((prev) => prev.map((user) => (user.id === result.user.id ? result.user : user)));
-                setFeedback(result.emailSent ? "Invite email resent." : `Invite refreshed, but email could not be sent: ${result.emailError}`);
+                setFeedback(result.emailSent ? "Invite email sent." : `Invite could not be sent: ${result.emailError}`);
             } catch (nextError: any) {
                 setError(String(nextError?.message || "Could not resend invite."));
+            } finally {
+                setActionUserId(null);
+            }
+        });
+    };
+
+    const handleRemoveUser = (userId: string) => {
+        setFeedback(null);
+        setError(null);
+        startTransition(async () => {
+            try {
+                setActionUserId(userId);
+                const result = await deactivateProvisionedUser(userId);
+                setUsers((prev) => prev.filter((user) => user.id !== result.user.id));
+                setFeedback("User deactivated and removed from the active provisioned roster.");
+            } catch (nextError: any) {
+                setError(String(nextError?.message || "Could not remove user."));
+            } finally {
+                setActionUserId(null);
             }
         });
     };
@@ -185,7 +204,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                         <button
                             type="button"
                             onClick={handleInvite}
-                            disabled={isPending || !firstName.trim() || !lastName.trim() || !email.trim()}
+                            disabled={Boolean(actionUserId) || !firstName.trim() || !lastName.trim() || !email.trim()}
                             className="inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-primary/15 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-primary/25 disabled:opacity-60"
                         >
                             <UserPlus className="h-4 w-4" />
@@ -309,18 +328,41 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                                         </span>
                                     </td>
                                     <td className="px-4 py-4 text-xs text-text-muted">
-                                        {user.inviteSentAt ? new Date(user.inviteSentAt).toLocaleString() : "Not sent"}
+                                        {user.inviteAcceptedAt ? (
+                                            <div className="space-y-1">
+                                                <div className="font-medium uppercase tracking-wider text-emerald-300">Active</div>
+                                                <div>{new Date(user.inviteAcceptedAt).toLocaleString()}</div>
+                                            </div>
+                                        ) : user.inviteSentAt ? (
+                                            <div className="space-y-1">
+                                                <div className="font-medium uppercase tracking-wider text-cyan-300">Sent</div>
+                                                <div>{new Date(user.inviteSentAt).toLocaleString()}</div>
+                                            </div>
+                                        ) : (
+                                            "Not sent"
+                                        )}
                                     </td>
                                     <td className="px-4 py-4 text-right">
-                                        <button
-                                            type="button"
-                                            onClick={() => handleResendInvite(user.id)}
-                                            disabled={isPending}
-                                            className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-60"
-                                        >
-                                            {user.inviteAcceptedAt ? <RefreshCcw className="h-4 w-4" /> : <Mail className="h-4 w-4" />}
-                                            {user.inviteAcceptedAt ? "Resend Access" : "Send Invite"}
-                                        </button>
+                                        <div className="flex justify-end gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => handleResendInvite(user.id)}
+                                                disabled={Boolean(actionUserId && actionUserId !== user.id)}
+                                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-60"
+                                            >
+                                                {user.inviteAcceptedAt ? <RefreshCcw className="h-4 w-4" /> : <Mail className="h-4 w-4" />}
+                                                {actionUserId === user.id ? "Sending..." : user.inviteAcceptedAt ? "Resend Access" : "Send Invite"}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleRemoveUser(user.id)}
+                                                disabled={Boolean(actionUserId && actionUserId !== user.id)}
+                                                className="inline-flex items-center gap-2 rounded-md border border-red-500/35 px-3 py-2 text-sm text-red-100 hover:bg-red-500/10 disabled:opacity-60"
+                                            >
+                                                <Trash2 className="h-4 w-4" />
+                                                Remove
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}

@@ -32,6 +32,7 @@ import {
     updateTaskSidebarBoard,
     updateTaskSidebarFolder,
 } from "@/app/actions";
+import { MissionControlMark } from "@/components/BrandMarks";
 
 export interface FolderWithLists {
     id: string;
@@ -460,12 +461,13 @@ export function Sidebar({
                 <button
                     type="button"
                     onClick={() => onSelectTab("command-center")}
-                    className="flex items-center gap-2 w-full cursor-pointer hover:bg-surface-hover p-1.5 rounded-md transition-colors"
+                    className="flex items-center gap-3 w-full cursor-pointer hover:bg-surface-hover p-1.5 rounded-xl transition-colors"
                 >
-                    <div className="w-5 h-5 bg-primary rounded shadow-glow flex items-center justify-center text-[10px] font-bold text-white shrink-0">
-                        MC
+                    <MissionControlMark className="h-9 w-9 rounded-xl" />
+                    <div className="min-w-0 text-left">
+                        <div className="font-semibold text-text-main text-[15px] leading-tight truncate">Mission Control</div>
+                        <div className="text-[10px] uppercase tracking-[0.26em] text-text-muted/90">Professional Services</div>
                     </div>
-                    <span className="font-medium text-text-main text-sm truncate">Mission Control</span>
                 </button>
             </div>
 

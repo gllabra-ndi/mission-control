@@ -15,6 +15,7 @@ import { CapacityTrends } from "@/components/CapacityTrends";
 import { CapacityGridPayload, EditableTaskBillableRollupRecord, TaskSidebarStructureRecord, loadDashboardWeekData } from "@/app/actions";
 import { ClickUpTask, TimeEntry, PROFESSIONAL_SERVICES_SPACE_ID } from "@/lib/clickup";
 import { Rocket } from "lucide-react";
+import { MissionEngineMark } from "@/components/BrandMarks";
 
 interface DashboardClientProps {
     initialTasks: ClickUpTask[];
@@ -505,16 +506,11 @@ export function DashboardClient({
             .filter((consultant: ConsultantDirectoryEntry) => Number.isFinite(consultant.id) && consultant.id !== 0 && consultant.name.length > 0);
     }, [dashboardConfigState?.consultants]);
 
-    const consultantsFromManualDirectory = useMemo<ConsultantDirectoryEntry[]>(
-        () => consultantsFromDirectory.filter((consultant) => String(consultant.source ?? "") !== "clickup"),
-        [consultantsFromDirectory]
-    );
-
     const mergedConsultants = useMemo<ConsultantDirectoryEntry[]>(() => {
         const byId = new Map<number, ConsultantDirectoryEntry>();
         const idByNameKey = new Map<string, number>();
 
-        consultantsFromManualDirectory.forEach((consultant: ConsultantDirectoryEntry) => {
+        consultantsFromDirectory.forEach((consultant: ConsultantDirectoryEntry) => {
             byId.set(consultant.id, consultant);
             const nameKey = normalizeConsultantNameKey(consultant.name);
             if (nameKey) idByNameKey.set(nameKey, consultant.id);
@@ -524,8 +520,6 @@ export function DashboardClient({
             const nameKey = normalizeConsultantNameKey(consultant.name);
             const existing = byId.get(consultant.id) || byId.get(idByNameKey.get(nameKey) || 0);
             if (!existing) {
-                byId.set(consultant.id, consultant);
-                if (nameKey) idByNameKey.set(nameKey, consultant.id);
                 return;
             }
             byId.set(existing.id, {
@@ -536,10 +530,11 @@ export function DashboardClient({
         });
 
         return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
-    }, [consultantsFromManualDirectory, consultantsFromTasks]);
+    }, [consultantsFromDirectory, consultantsFromTasks]);
 
     const consultantsForRoster = useMemo(() => {
         const gridResources = Array.isArray(capacityGridState?.resources) ? capacityGridState.resources : [];
+        const provisionedIds = new Set(mergedConsultants.map((consultant) => consultant.id));
         if (gridResources.length > 0) {
             return gridResources
                 .map((resource: any, idx: number) => ({
@@ -547,6 +542,10 @@ export function DashboardClient({
                     name: String(resource?.name ?? "").trim(),
                     removed: Boolean(resource?.removed ?? false),
                 }))
+                .filter((consultant) => {
+                    if (consultant.removed) return true;
+                    return provisionedIds.has(consultant.id);
+                })
                 .filter((consultant) => consultant.name.length > 0);
         }
         return mergedConsultants;
@@ -816,10 +815,11 @@ export function DashboardClient({
                 {/* Header Bar */}
                 <header className="h-14 border-b border-border flex items-center justify-between px-6 shrink-0 bg-background/90 backdrop-blur-md z-20">
                     <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 rounded overflow-hidden">
-                            <div className="w-full h-full bg-gradient-to-br from-indigo-500 to-purple-500 rounded-sm" />
+                        <MissionEngineMark className="h-9 w-9 rounded-xl" />
+                        <div className="min-w-0">
+                            <h1 className="font-semibold text-white leading-tight">Mission Engine</h1>
+                            <div className="text-[10px] uppercase tracking-[0.3em] text-text-muted/85">Live Operations</div>
                         </div>
-                        <h1 className="font-semibold text-white">Mission Engine</h1>
                         <span className="text-text-muted text-xs bg-surface-hover px-2 py-0.5 rounded-full border border-border">
                             Prod
                         </span>

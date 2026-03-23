@@ -5,7 +5,7 @@ import { mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
-import { addDays, addWeeks } from "date-fns";
+import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
@@ -16,6 +16,7 @@ export interface CapacityGridResource {
     orderIndex: number;
     consultantId?: number | null;
     removed?: boolean;
+    removedAt?: string | null;
 }
 
 export interface CapacityGridAllocation {
@@ -182,6 +183,7 @@ export interface EditableTaskBillableRollupRecord {
     scopeId: string;
     assignee: string;
     hours: number;
+    sourceTaskId?: string | null;
 }
 
 export interface TaskSidebarFolderRecord {
@@ -558,6 +560,10 @@ function getWeekDateRange(week: string) {
     };
 }
 
+function getCurrentWeekStartKey() {
+    return format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
+}
+
 function buildResourcesFromConsultants(consultants?: CapacityGridConsultant[] | string[]): CapacityGridResource[] {
     if (!Array.isArray(consultants) || consultants.length === 0) return DEFAULT_CAPACITY_GRID_RESOURCES;
 
@@ -711,6 +717,7 @@ function sanitizeCapacityPayload(input: any, forcedResources?: CapacityGridResou
                 ? Number(r.consultantId)
                 : null,
             removed: Boolean(r?.removed ?? false),
+            removedAt: r?.removedAt ? String(r.removedAt) : null,
         }))
         : DEFAULT_CAPACITY_GRID_RESOURCES;
 
@@ -850,6 +857,7 @@ function mergeCapacityPayloadWithRoster(payload: CapacityGridPayload, rosterReso
 function alignCapacityPayloadToRoster(payload: CapacityGridPayload, rosterResources: CapacityGridResource[]): CapacityGridPayload {
     if (rosterResources.length === 0) return payload;
 
+    const existingResources = Array.isArray(payload?.resources) ? payload.resources : [];
     const rosterByConsultantId = new Map(
         rosterResources
             .filter((resource) => Number(resource.consultantId ?? 0) > 0)
@@ -857,8 +865,15 @@ function alignCapacityPayloadToRoster(payload: CapacityGridPayload, rosterResour
     );
     const rosterByNorm = new Map(rosterResources.map((resource) => [normalizeName(resource.name), resource]));
     const rosterByFirstToken = new Map(rosterResources.map((resource) => [normalizeFirstToken(resource.name), resource]));
+    const existingByConsultantId = new Map(
+        existingResources
+            .filter((resource) => Number(resource?.consultantId ?? 0) > 0)
+            .map((resource) => [Number(resource.consultantId), resource] as const)
+    );
+    const existingByNorm = new Map(existingResources.map((resource) => [normalizeName(String(resource?.name ?? "")), resource] as const));
+    const existingByFirstToken = new Map(existingResources.map((resource) => [normalizeFirstToken(String(resource?.name ?? "")), resource] as const));
 
-    const preservedResources = (Array.isArray(payload?.resources) ? payload.resources : []).filter((resource) => {
+    const preservedResources = existingResources.filter((resource) => {
         if (Boolean(resource?.removed)) return true;
         if (Number(resource?.consultantId ?? 0) <= 0) return true;
         const consultantId = Number(resource?.consultantId ?? 0);
@@ -871,7 +886,21 @@ function alignCapacityPayloadToRoster(payload: CapacityGridPayload, rosterResour
     });
 
     const targetResources = [
-        ...rosterResources,
+        ...rosterResources.map((resource, idx) => {
+            const consultantId = Number(resource.consultantId ?? 0);
+            const existing =
+                (consultantId > 0 ? existingByConsultantId.get(consultantId) : null)
+                ?? existingByNorm.get(normalizeName(resource.name))
+                ?? existingByFirstToken.get(normalizeFirstToken(resource.name))
+                ?? null;
+
+            return {
+                ...resource,
+                removed: Boolean(existing?.removed ?? resource.removed ?? false),
+                removedAt: existing?.removedAt ? String(existing.removedAt) : (resource.removedAt ? String(resource.removedAt) : null),
+                orderIndex: idx,
+            };
+        }),
         ...preservedResources
             .filter((resource) => !rosterResources.some((roster) => roster.id === resource.id))
             .map((resource, idx) => ({
@@ -1272,21 +1301,13 @@ async function syncClickUpConsultantsIntoLocalDirectory() {
         return;
     }
 
-    const [existingConsultants, existingAppUsers] = await Promise.all([
-        prisma.consultant.findMany(),
-        prisma.appUser.findMany(),
-    ]);
+    const existingConsultants = await prisma.consultant.findMany();
 
     const consultantById = new Map<number, any>();
     const consultantByEmail = new Map<string, any>();
     existingConsultants.forEach((consultant) => {
         consultantById.set(Number(consultant.id), consultant);
         consultantByEmail.set(normalizeEmail(String(consultant.email ?? "")), consultant);
-    });
-
-    const appUserByEmail = new Map<string, any>();
-    existingAppUsers.forEach((appUser) => {
-        appUserByEmail.set(normalizeEmail(String(appUser.email ?? "")), appUser);
     });
 
     for (const consultant of Array.from(rosterById.values())) {
@@ -1327,27 +1348,6 @@ async function syncClickUpConsultantsIntoLocalDirectory() {
             });
         }
 
-        const existingUser = appUserByEmail.get(consultant.email);
-        if (existingUser) {
-            await prisma.appUser.update({
-                where: { email: consultant.email },
-                data: {
-                    firstName: consultant.firstName,
-                    lastName: consultant.lastName,
-                },
-            });
-        } else {
-            await prisma.appUser.create({
-                data: {
-                    firstName: consultant.firstName,
-                    lastName: consultant.lastName,
-                    email: consultant.email,
-                    role: "member",
-                    status: "invited",
-                    invitedAt: new Date(),
-                },
-            });
-        }
     }
 
     lastClickUpConsultantSyncAt = now;
@@ -1369,76 +1369,28 @@ async function ensureClickUpConsultantsSynced() {
 
 export async function syncClickUpConsultantsAndUsers(): Promise<ConsultantRecord[]> {
     await ensureClickUpConsultantsSynced();
-    const consultantRoster = await getConsultantUtilizationDirectory();
-    await ensureConsultantsProvisionedAsAppUsers(consultantRoster);
-    return consultantRoster;
+    return await getConsultantUtilizationDirectory();
 }
 
-export async function getConsultantUtilizationDirectory(): Promise<ConsultantRecord[]> {
+export async function getConsultantUtilizationDirectory(week?: string): Promise<ConsultantRecord[]> {
     const savedConsultants = await getConsultants();
-    const tasks = await getTeamTasks();
-    const currentWeek = addDays(new Date(), 0);
-    const weekStart = `${currentWeek.getFullYear()}-${String(currentWeek.getMonth() + 1).padStart(2, "0")}-${String(currentWeek.getDate()).padStart(2, "0")}`;
-    const normalizedWeek = new Date(`${weekStart}T00:00:00`);
-    const monday = new Date(normalizedWeek);
-    const day = monday.getDay() || 7;
-    monday.setDate(monday.getDate() - (day - 1));
-    const activeWeek = monday.toISOString().slice(0, 10);
-
-    const rosterById = new Map<number, ConsultantRecord>();
-    const rosterIdByName = new Map<string, number>();
-    const savedById = new Map<number, ConsultantRecord>();
-
-    savedConsultants.forEach((consultant) => {
-        savedById.set(consultant.id, consultant);
-        if (String(consultant.source ?? "") === "clickup") return;
-        rosterById.set(consultant.id, consultant);
-        const nameKey = normalizeName(consultant.fullName);
-        if (nameKey) rosterIdByName.set(nameKey, consultant.id);
-    });
-
-    tasks.forEach((task: any) => {
-        if (!Array.isArray(task?.assignees)) return;
-        task.assignees.forEach((assignee: any) => {
-            const consultantId = Number(assignee?.id ?? 0);
-            const consultantName = String(assignee?.username ?? "").trim();
-            if (consultantId <= 0 || !consultantName) return;
-
-            const saved = savedById.get(consultantId);
-            const existing = rosterById.get(consultantId) || rosterById.get(rosterIdByName.get(normalizeName(consultantName)) || 0);
-            const nameParts = consultantName.split(/\s+/).filter(Boolean);
-            const fallbackFirstName = nameParts[0] ?? consultantName;
-            const fallbackLastName = nameParts.slice(1).join(" ");
-
-            const record: ConsultantRecord = {
-                id: consultantId,
-                firstName: String(saved?.firstName ?? existing?.firstName ?? fallbackFirstName).trim(),
-                lastName: String(saved?.lastName ?? existing?.lastName ?? fallbackLastName).trim(),
-                email: String(saved?.email ?? existing?.email ?? "").trim(),
-                fullName: String(saved?.fullName ?? existing?.fullName ?? consultantName).trim(),
-                source: String(saved?.source ?? existing?.source ?? "clickup"),
-                externalId: saved?.externalId ?? existing?.externalId ?? String(consultantId),
-            };
-            rosterById.set(consultantId, record);
-            const nameKey = normalizeName(record.fullName);
-            if (nameKey) rosterIdByName.set(nameKey, consultantId);
-        });
-    });
-
-    const roster = Array.from(rosterById.values()).sort((a, b) => a.fullName.localeCompare(b.fullName));
-    const capacityGrid = await getCapacityGridConfig(
-        activeWeek,
-        roster.map((consultant) => ({ id: consultant.id, name: consultant.fullName }))
+    const provisionedEmails = new Set(
+        (await prisma.appUser.findMany({
+            where: {
+                status: {
+                    not: "disabled",
+                },
+            },
+            select: { email: true },
+        }))
+            .map((row) => normalizeEmail(String(row?.email ?? "")))
+            .filter((email) => email.length > 0)
     );
 
-    const activeIds = new Set<number>(
-        (Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [])
-            .filter((resource) => !Boolean(resource?.removed))
-            .map((resource) => Number(resource?.consultantId ?? 0))
-            .filter((consultantId) => consultantId > 0)
-    );
-
-    return roster.filter((consultant) => activeIds.has(consultant.id));
+    return savedConsultants.filter((consultant) => {
+        const email = normalizeEmail(consultant.email);
+        return email.length > 0 && provisionedEmails.has(email);
+    }).sort((a, b) => a.fullName.localeCompare(b.fullName));
 }
 
 export async function ensureConsultantsProvisionedAsAppUsers(consultantsInput?: ConsultantRecord[]) {
@@ -1612,36 +1564,44 @@ export async function createConsultant(input: {
 async function issueAppUserInvite(row: any, inviterName: string) {
     const inviteToken = randomBytes(24).toString("hex");
     const inviteExpiresAt = addDays(new Date(), 7);
+    const currentStatus = String(row?.status ?? "invited");
 
-    const updated = await prisma.appUser.update({
+    const preparedUser = await prisma.appUser.update({
         where: { id: String(row.id) },
         data: {
             inviteToken,
             inviteExpiresAt,
             invitedAt: row.invitedAt ?? new Date(),
-            inviteSentAt: new Date(),
-            status: String(row.status ?? "invited") === "disabled" ? "disabled" : "sent",
         },
     });
 
-    const inviteUrl = getInviteUrl(inviteToken, String(updated.email));
+    const inviteUrl = getInviteUrl(inviteToken, String(preparedUser.email));
     const emailResult = await sendInviteEmail({
-        email: String(updated.email),
-        firstName: String(updated.firstName ?? ""),
+        email: String(preparedUser.email),
+        firstName: String(preparedUser.firstName ?? ""),
         inviterName,
         inviteUrl,
-        roleLabel: ROLE_DEFINITIONS[normalizeAppRole(String(updated.role ?? "member"))].label,
+        roleLabel: ROLE_DEFINITIONS[normalizeAppRole(String(preparedUser.role ?? "member"))].label,
     });
 
+    const finalizedUser = emailResult.ok
+        ? await prisma.appUser.update({
+            where: { id: String(preparedUser.id) },
+            data: {
+                inviteSentAt: new Date(),
+                status: currentStatus === "active" ? "active" : "sent",
+            },
+        })
+        : preparedUser;
+
     return {
-        user: mapAppUser(updated),
+        user: mapAppUser(finalizedUser),
         emailSent: emailResult.ok,
         emailError: emailResult.ok ? null : emailResult.reason,
     };
 }
 
 export async function getAppUsers(consultantsInput?: ConsultantRecord[]): Promise<AppUserRecord[]> {
-    await ensureConsultantsProvisionedAsAppUsers(consultantsInput);
     const rows = await prisma.appUser.findMany({
         orderBy: [
             { createdAt: "asc" },
@@ -1650,6 +1610,197 @@ export async function getAppUsers(consultantsInput?: ConsultantRecord[]): Promis
     });
 
     return rows.map(mapAppUser);
+}
+
+async function setAppUserDisabledByEmail(email: string) {
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) return null;
+
+    const existing = await prisma.appUser.findUnique({
+        where: { email: normalizedEmail },
+    });
+    if (!existing) return null;
+
+    return await prisma.appUser.update({
+        where: { email: normalizedEmail },
+        data: {
+            status: "disabled",
+            inviteToken: null,
+            inviteExpiresAt: null,
+        },
+    });
+}
+
+async function updateConsultantRosterRemovalState(input: {
+    week: string;
+    consultantId?: number | null;
+    consultantName?: string | null;
+    resourceId?: string | null;
+    removed: boolean;
+    removedAt?: string | null;
+}): Promise<CapacityGridPayload | null> {
+    const week = String(input.week || "").trim() || getCurrentWeekStartKey();
+    const consultantId = Number(input.consultantId ?? 0);
+    const consultantName = String(input.consultantName || "").trim();
+    const resourceId = String(input.resourceId || "").trim();
+    const capacityGridModel = (prisma as any).capacityGridConfig;
+    if (!capacityGridModel) return null;
+
+    let existing = await capacityGridModel.findUnique({
+        where: { week },
+    });
+
+    if (!existing) {
+        const consultantRoster = await getConsultantUtilizationDirectory(week);
+        const seed = await buildSeedCapacityGrid(
+            week,
+            consultantRoster.map((consultant) => ({ id: consultant.id, name: consultant.fullName }))
+        );
+        await capacityGridModel.create({
+            data: {
+                week,
+                resourcesJson: JSON.stringify(seed.resources),
+                rowsJson: JSON.stringify(seed.rows),
+            },
+        });
+        existing = await capacityGridModel.findUnique({
+            where: { week },
+        });
+    }
+
+    if (!existing) return null;
+
+    const parsed = sanitizeCapacityPayload({
+        resources: JSON.parse(existing.resourcesJson || "[]"),
+        rows: JSON.parse(existing.rowsJson || "[]"),
+    });
+
+    let changed = false;
+    const consultantNameKey = normalizeName(consultantName);
+    const nextRemovedAt = input.removed ? (String(input.removedAt || "").trim() || new Date().toISOString()) : null;
+
+    const nextResources = parsed.resources.map((resource, idx) => {
+        const resourceConsultantId = Number(resource?.consultantId ?? 0);
+        const resourceNameKey = normalizeName(String(resource?.name ?? ""));
+        const matches = (
+            (resourceId && String(resource?.id ?? "") === resourceId)
+            || (consultantId > 0 && resourceConsultantId === consultantId)
+            || (consultantNameKey && resourceNameKey === consultantNameKey)
+        );
+
+        if (!matches) {
+            return {
+                ...resource,
+                orderIndex: idx,
+            };
+        }
+
+        const currentRemoved = Boolean(resource?.removed ?? false);
+        const currentRemovedAt = resource?.removedAt ? String(resource.removedAt) : null;
+        if (currentRemoved !== input.removed || currentRemovedAt !== nextRemovedAt) {
+            changed = true;
+        }
+
+        return {
+            ...resource,
+            removed: input.removed,
+            removedAt: nextRemovedAt,
+            orderIndex: idx,
+        };
+    });
+
+    const nextPayload: CapacityGridPayload = {
+        resources: nextResources,
+        rows: parsed.rows,
+    };
+
+    if (changed) {
+        await capacityGridModel.update({
+            where: { week },
+            data: {
+                resourcesJson: JSON.stringify(nextPayload.resources),
+                rowsJson: JSON.stringify(nextPayload.rows),
+            },
+        });
+    }
+
+    return nextPayload;
+}
+
+export async function deactivateProvisionedUser(userId: string, week?: string) {
+    const user = await prisma.appUser.findUnique({
+        where: { id: String(userId) },
+    });
+    if (!user) {
+        throw new Error("User not found.");
+    }
+
+    const targetWeek = String(week || "").trim() || getCurrentWeekStartKey();
+    const consultant = await prisma.consultant.findUnique({
+        where: { email: normalizeEmail(String(user.email ?? "")) },
+    });
+
+    const updatedUser = await prisma.appUser.update({
+        where: { id: String(userId) },
+        data: {
+            status: "disabled",
+            inviteToken: null,
+            inviteExpiresAt: null,
+        },
+    });
+
+    const capacityGrid = consultant
+        ? await updateConsultantRosterRemovalState({
+            week: targetWeek,
+            consultantId: Number(consultant.id),
+            consultantName: formatConsultantName(String(consultant.firstName ?? ""), String(consultant.lastName ?? "")),
+            removed: true,
+            removedAt: new Date().toISOString(),
+        })
+        : null;
+
+    revalidatePath("/settings");
+
+    return {
+        user: mapAppUser(updatedUser),
+        capacityGrid,
+    };
+}
+
+export async function deactivateConsultantFromUtilization(input: {
+    week: string;
+    consultantId: number;
+    consultantName?: string;
+    consultantEmail?: string;
+    resourceId?: string;
+}) {
+    const week = String(input.week || "").trim() || getCurrentWeekStartKey();
+    const consultantId = Number(input.consultantId ?? 0);
+    if (!consultantId) {
+        throw new Error("Consultant not found.");
+    }
+
+    const consultant = await prisma.consultant.findUnique({
+        where: { id: consultantId },
+    });
+
+    const consultantEmail = normalizeEmail(String(input.consultantEmail || consultant?.email || ""));
+    const updatedUser = consultantEmail ? await setAppUserDisabledByEmail(consultantEmail) : null;
+    const capacityGrid = await updateConsultantRosterRemovalState({
+        week,
+        consultantId,
+        consultantName: String(input.consultantName || formatConsultantName(String(consultant?.firstName ?? ""), String(consultant?.lastName ?? ""))).trim(),
+        resourceId: String(input.resourceId || "").trim(),
+        removed: true,
+        removedAt: new Date().toISOString(),
+    });
+
+    revalidatePath("/settings");
+
+    return {
+        user: updatedUser ? mapAppUser(updatedUser) : null,
+        capacityGrid,
+    };
 }
 
 export async function inviteAppUser(input: {
@@ -2588,7 +2739,8 @@ export async function getEditableTaskBillableRollups(week: string): Promise<Edit
 
         const scopeType = String(row?.scopeType ?? "");
         const scopeId = String(row?.scopeId ?? "");
-        const key = `${scopeType}|${scopeId}|${normalizeName(assignee)}`;
+        const sourceTaskId = String(row?.sourceTaskId ?? "").trim() || null;
+        const key = `${scopeType}|${scopeId}|${normalizeName(assignee)}|${sourceTaskId ?? ""}`;
         const current = rollups.get(key);
         if (current) {
             current.hours += hours;
@@ -2599,6 +2751,7 @@ export async function getEditableTaskBillableRollups(week: string): Promise<Edit
             scopeId,
             assignee,
             hours,
+            sourceTaskId,
         });
     });
 

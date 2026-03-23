@@ -114,6 +114,41 @@ function getTaskClientLabel(task: ClickUpTask | null) {
     return listName || projectName || folderName || "Unassigned Client";
 }
 
+function resolveCapacityClientLabel(task: ClickUpTask | null, clientLabels: string[]) {
+    const candidates = [
+        String(task?.list?.name ?? "").trim(),
+        String(task?.project?.name ?? "").trim(),
+        String(task?.folder?.name ?? "").trim(),
+    ].filter(Boolean);
+
+    if (candidates.length === 0) return "Unassigned Client";
+
+    const normalizedClientLabels = clientLabels.map((label) => ({
+        label,
+        normalized: normalizeName(label),
+    }));
+
+    for (const candidate of candidates) {
+        const normalizedCandidate = normalizeName(candidate);
+        if (!normalizedCandidate) continue;
+
+        const exact = normalizedClientLabels.find((entry) => entry.normalized === normalizedCandidate);
+        if (exact) return exact.label;
+
+        const substringMatches = normalizedClientLabels
+            .filter((entry) => entry.normalized && normalizedCandidate.includes(entry.normalized))
+            .sort((a, b) => b.normalized.length - a.normalized.length);
+        if (substringMatches[0]) return substringMatches[0].label;
+
+        const reverseSubstringMatches = normalizedClientLabels
+            .filter((entry) => entry.normalized && entry.normalized.includes(normalizedCandidate))
+            .sort((a, b) => b.normalized.length - a.normalized.length);
+        if (reverseSubstringMatches[0]) return reverseSubstringMatches[0].label;
+    }
+
+    return candidates[0];
+}
+
 function getDefaultBillableEntryDate(activeWeekStr: string): string {
     const start = new Date(`${activeWeekStr}T00:00:00`);
     const end = addDays(start, 4);
@@ -223,6 +258,13 @@ export function Timesheets({
             });
     }, [editableTasks, selectedConsultant, sourceTaskById]);
 
+    const capacityClientLabels = useMemo(
+        () => (Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [])
+            .map((row) => String(row?.client ?? "").trim())
+            .filter(Boolean),
+        [capacityGrid]
+    );
+
     const plannedHoursByClient = useMemo(() => {
         const selectedKey = normalizeName(selectedConsultant);
         const resources = Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [];
@@ -244,7 +286,7 @@ export function Timesheets({
     const taskRows = useMemo<TimesheetTaskRow[]>(() => {
         return visibleTasks.map((task) => {
             const sourceTask = task.sourceTaskId ? sourceTaskById.get(String(task.sourceTaskId)) : null;
-            const clientLabel = getTaskClientLabel(sourceTask ?? null);
+            const clientLabel = resolveCapacityClientLabel(sourceTask ?? null, capacityClientLabels);
             const plannedHours = Number(plannedHoursByClient.get(clientLabel) ?? 0);
             const billedHours = Number(getTaskWeeklyBillableHours(task).toFixed(1));
             const entries = [...(task.billableEntries || [])].sort((a, b) => {
@@ -261,7 +303,7 @@ export function Timesheets({
                 entries,
             };
         });
-    }, [plannedHoursByClient, sourceTaskById, visibleTasks]);
+    }, [capacityClientLabels, plannedHoursByClient, sourceTaskById, visibleTasks]);
 
     useEffect(() => {
         setEntryDrafts((current) => {
@@ -272,15 +314,6 @@ export function Timesheets({
             return nextDrafts;
         });
     }, [activeWeekStr, taskRows]);
-
-    const overallSummary = useMemo(() => {
-        return taskRows.reduce((acc, row) => {
-            acc.plannedHours += row.plannedHours;
-            acc.billedHours += row.billedHours;
-            acc.remainingHours += row.remainingHours;
-            return acc;
-        }, { plannedHours: 0, billedHours: 0, remainingHours: 0 });
-    }, [taskRows]);
 
     const clientGroups = useMemo(() => {
         const groups = new Map<string, {
@@ -294,12 +327,11 @@ export function Timesheets({
         taskRows.forEach((row) => {
             const existing = groups.get(row.clientLabel) ?? {
                 clientLabel: row.clientLabel,
-                plannedHours: 0,
+                plannedHours: Number(plannedHoursByClient.get(row.clientLabel) ?? 0),
                 billedHours: 0,
                 remainingHours: 0,
                 tasks: [],
             };
-            existing.plannedHours += row.plannedHours;
             existing.billedHours += row.billedHours;
             existing.tasks.push(row);
             groups.set(row.clientLabel, existing);
@@ -311,7 +343,17 @@ export function Timesheets({
                 remainingHours: Number(Math.max(0, group.plannedHours - group.billedHours).toFixed(1)),
             }))
             .sort((a, b) => a.clientLabel.localeCompare(b.clientLabel));
-    }, [taskRows]);
+    }, [plannedHoursByClient, taskRows]);
+
+    const overallSummary = useMemo(() => {
+        const plannedHours = Array.from(plannedHoursByClient.values()).reduce((sum, hours) => sum + Number(hours ?? 0), 0);
+        const billedHours = clientGroups.reduce((sum, group) => sum + group.billedHours, 0);
+        return {
+            plannedHours: Number(plannedHours.toFixed(1)),
+            billedHours: Number(billedHours.toFixed(1)),
+            remainingHours: Number(Math.max(0, plannedHours - billedHours).toFixed(1)),
+        };
+    }, [clientGroups, plannedHoursByClient]);
 
     const handleDraftChange = (taskId: string, data: Partial<BillableEntryDraft>) => {
         setEntryDrafts((prev) => ({
@@ -433,7 +475,7 @@ export function Timesheets({
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.plannedHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Billed This Week</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Actuals This Week</div>
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.billedHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-primary/30 bg-[linear-gradient(180deg,rgba(29,39,69,0.98)_0%,rgba(16,24,44,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
@@ -473,7 +515,7 @@ export function Timesheets({
                                         <div className="mt-1 text-xl font-semibold text-white">{group.plannedHours.toFixed(1)}</div>
                                     </div>
                                     <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
-                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Billed</div>
+                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Actuals</div>
                                         <div className="mt-1 text-xl font-semibold text-white">{group.billedHours.toFixed(1)}</div>
                                     </div>
                                     <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-2">
@@ -510,7 +552,7 @@ export function Timesheets({
                                                         <div className="mt-1 text-lg font-semibold text-white">{row.plannedHours.toFixed(1)}</div>
                                                     </div>
                                                     <div className="rounded-xl border border-border/50 bg-background/25 px-3 py-3">
-                                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Billed</div>
+                                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Actuals</div>
                                                         <div className="mt-1 text-lg font-semibold text-white">{row.billedHours.toFixed(1)}</div>
                                                     </div>
                                                     <div className="rounded-xl border border-primary/30 bg-primary/10 px-3 py-3">

@@ -3,10 +3,6 @@ import { UserAccessSettings } from "@/components/UserAccessSettings";
 import { getAppSession, isAuthEnabled, requireAdminSession } from "@/lib/auth";
 import Link from "next/link";
 
-function normalizeRosterKey(value: string) {
-    return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
 export default async function SettingsPage() {
     if (isAuthEnabled) {
         await requireAdminSession();
@@ -23,13 +19,10 @@ export default async function SettingsPage() {
             .map((consultant) => String(consultant.email || "").trim().toLowerCase())
             .filter((email) => email.length > 0)
     );
-    const consultantNames = new Set(
-        consultantRoster.map((consultant) => normalizeRosterKey(consultant.fullName))
-    );
     const filteredUsers = users.filter((user) => {
         const emailKey = String(user.email || "").trim().toLowerCase();
-        const nameKey = normalizeRosterKey(`${user.firstName} ${user.lastName}`);
-        return consultantEmails.has(emailKey) || consultantNames.has(nameKey);
+        if (String(user.status || "").toLowerCase() === "disabled") return false;
+        return consultantEmails.has(emailKey);
     });
 
     const currentUserName = String(session?.user?.name || "Mission Control Admin").trim() || "Mission Control Admin";

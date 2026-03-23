@@ -13,7 +13,7 @@ import {
     getClientConfigs,
     getClientDirectory,
     getConsultantConfigs,
-    getConsultants,
+    getConsultantUtilizationDirectory,
     getCapacityGridConfig,
     getConsultantConfigsForYear,
     getCapacityGridConfigsForYear,
@@ -112,7 +112,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         getClientConfigs(weekStartStr),
         getClientDirectory(),
         getConsultantConfigs(weekStartStr),
-        getConsultants(),
+        getConsultantUtilizationDirectory(weekStartStr),
         getConsultantConfigsForYear(activeYear),
         getCapacityGridConfigsForYear(activeYear),
         getLeadConfigs(previousWeekStartStr),
@@ -129,9 +129,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     const consultantIdByNameKey = new Map<string, number>();
 
     savedConsultants.forEach((consultant) => {
-        if (String(consultant.source ?? "") === "clickup") {
-            return;
-        }
         const consultantName = consultant.fullName;
         consultantRosterById.set(consultant.id, {
             id: consultant.id,
@@ -157,21 +154,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
                 const nameKey = normalizeConsultantNameKey(nextName);
                 const matchedConsultantId = existingById ? id : consultantIdByNameKey.get(nameKey);
                 const existing = matchedConsultantId ? consultantRosterById.get(matchedConsultantId) : undefined;
-                if (!existing) {
-                    consultantRosterById.set(id, { id, name: nextName, source: "clickup" });
-                    if (nameKey) consultantIdByNameKey.set(nameKey, id);
-                    return;
-                }
+                if (!existing) return;
                 const existingTokens = existing.name.split(/\s+/).filter(Boolean).length;
                 const nextTokens = nextName.split(/\s+/).filter(Boolean).length;
                 if (nextTokens > existingTokens || (nextTokens === existingTokens && nextName.length > existing.name.length)) {
                     consultantRosterById.set(existing.id, {
                         ...existing,
-                        name: nextName,
-                    });
-                    if (nameKey) consultantIdByNameKey.set(nameKey, existing.id);
-                }
-            });
+                    name: nextName,
+                });
+                if (nameKey) consultantIdByNameKey.set(nameKey, existing.id);
+            }
+        });
         });
 
     const consultantRoster = Array.from(consultantRosterById.values())

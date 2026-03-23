@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { addDays, addWeeks, format, startOfWeek, subWeeks } from "date-fns";
 import { ChevronLeft, ChevronRight, Copy, Plus, RotateCcw, Trash2, Users, X } from "lucide-react";
-import { copyConsultantUtilizationFromPriorWeek, createConsultant, updateConsultantConfig, updateCapacityGridConfig, CapacityGridPayload } from "@/app/actions";
+import { copyConsultantUtilizationFromPriorWeek, createConsultant, deactivateConsultantFromUtilization, updateConsultantConfig, updateCapacityGridConfig, CapacityGridPayload } from "@/app/actions";
 import { cn } from "@/lib/utils";
 
 interface ConsultantUtilizationProps {
@@ -150,7 +150,12 @@ export function ConsultantUtilization({
                     resourceId: String(resource?.id ?? `resource-${idx + 1}`),
                     removed: Boolean(resource?.removed ?? false),
                     email: consultantDirectoryById.get(Number(resource?.consultantId ?? 0))?.email || "",
+                    removedAt: resource?.removedAt ? String(resource.removedAt) : "",
                 }))
+                .filter((consultant) => {
+                    if (consultant.removed) return true;
+                    return consultantDirectoryById.has(consultant.id);
+                })
                 .filter((consultant) => consultant.name.length > 0)
                 .sort((a, b) => a.name.localeCompare(b.name));
         }
@@ -163,6 +168,7 @@ export function ConsultantUtilization({
                 resourceId: "",
                 removed: false,
                 email: consultantDirectoryById.get(Number(consultant.id ?? 0))?.email || "",
+                removedAt: "",
             }));
     }, [capacityGrid?.resources, consultantDirectoryById, consultants]);
 
@@ -242,28 +248,20 @@ export function ConsultantUtilization({
     };
 
     const handleConfirmRemoveConsultant = (resourceId: string) => {
-        const nextResources = (Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [])
-            .map((resource: any, idx: number) => {
-                if (String(resource?.id ?? "") !== resourceId) {
-                    return {
-                        ...resource,
-                        orderIndex: idx,
-                    };
-                }
-                return {
-                    ...resource,
-                    removed: true,
-                    orderIndex: idx,
-                };
-            })
-            .map((resource: any, idx: number) => ({
-                ...resource,
-                orderIndex: idx,
-            }));
+        const targetConsultant = consultantsForDisplay.find((consultant) => consultant.resourceId === resourceId);
+        if (!targetConsultant) return;
 
-        persistCapacityGrid({
-            resources: nextResources,
-            rows: Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [],
+        startTransition(async () => {
+            const result = await deactivateConsultantFromUtilization({
+                week: activeWeekStr,
+                consultantId: targetConsultant.id,
+                consultantName: targetConsultant.name,
+                consultantEmail: targetConsultant.email,
+                resourceId,
+            });
+            if (result.capacityGrid) {
+                onCapacityGridChange?.(result.capacityGrid);
+            }
         });
     };
 
@@ -274,7 +272,7 @@ export function ConsultantUtilization({
     const handleConfirmReinstateConsultant = (resourceId: string) => {
         const nextResources = (Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [])
             .map((resource: any, idx: number) => ({
-                ...(String(resource?.id ?? "") === resourceId ? { ...resource, removed: false } : resource),
+                ...(String(resource?.id ?? "") === resourceId ? { ...resource, removed: false, removedAt: null } : resource),
                 orderIndex: idx,
             }));
 
@@ -524,6 +522,11 @@ export function ConsultantUtilization({
                                             {consultant.email ? (
                                                 <div className="mt-0.5 text-[11px] text-text-muted">{consultant.email}</div>
                                             ) : null}
+                                            {activeRosterTab === "removed" && consultant.removedAt ? (
+                                                <div className="mt-0.5 text-[11px] text-text-muted">
+                                                    Removed {new Date(consultant.removedAt).toLocaleDateString()}
+                                                </div>
+                                            ) : null}
                                         </td>
                                         <td className="px-5 py-2 border-l border-border/30">
                                             <input
@@ -621,7 +624,7 @@ export function ConsultantUtilization({
                             </div>
                             <div className="mt-1 text-xs text-text-muted">
                                 {rosterConfirm.action === "hide"
-                                    ? <>This will hide <span className="font-medium text-white">{rosterConfirm.consultantName}</span> from this week&apos;s roster and capacity views.</>
+                                    ? <>This will deactivate <span className="font-medium text-white">{rosterConfirm.consultantName}</span>, remove them from Provisioned Users, and move them into this week&apos;s Removed tab.</>
                                     : <>This will restore <span className="font-medium text-white">{rosterConfirm.consultantName}</span> to this week&apos;s roster and capacity views.</>}
                             </div>
                         </div>
@@ -636,7 +639,7 @@ export function ConsultantUtilization({
                     </div>
                     <div className="px-5 py-4 text-sm text-text-muted">
                         {rosterConfirm.action === "hide"
-                            ? "The consultant will remain hidden until you choose to reinstate them from the Removed tab."
+                            ? "The consultant will remain in the Removed tab with the removed date captured for this week."
                             : "The consultant will return to the Active tab and appear again across the planning screens."}
                     </div>
                     <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">

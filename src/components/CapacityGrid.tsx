@@ -43,6 +43,14 @@ function normalizeName(value: string) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function getTaskScopeLabels(task: ClickUpTask | null) {
+    return [
+        String(task?.list?.name ?? "").trim(),
+        String(task?.project?.name ?? "").trim(),
+        String(task?.folder?.name ?? "").trim(),
+    ].filter(Boolean);
+}
+
 function formatConsultantHeaderName(value: string) {
     const tokens = String(value || "").trim().split(/\s+/).filter(Boolean);
     if (tokens.length <= 1) return tokens[0] ?? "";
@@ -162,6 +170,16 @@ export function CapacityGrid({
         });
         return { byId, byName };
     }, [clientDirectory]);
+
+    const sourceTaskById = useMemo(() => {
+        const byId = new Map<string, ClickUpTask>();
+        tasks.forEach((task) => {
+            const id = String(task?.id ?? "").trim();
+            if (!id) return;
+            byId.set(id, task);
+        });
+        return byId;
+    }, [tasks]);
 
     const getClientMetadata = useCallback((row: CapacityGridRow) => {
         const idKey = normalizeName(String(row.id ?? ""));
@@ -577,28 +595,59 @@ export function CapacityGrid({
         [billableCapacityByResource]
     );
 
-    const getConsultantHeaderClass = (resourceId: string) => {
+    const getConsultantHeaderNameClass = (resourceId: string) => {
         const cap = Number(billableCapacityByResource[resourceId] ?? 0);
         const allocated = Number(totals.hoursByResource[resourceId] ?? 0);
-        if (cap <= 0) return "text-slate-200";
+        const bothZero = Math.abs(allocated) < 0.01 && Math.abs(cap) < 0.01;
+        if (bothZero) return "text-white";
         if (Math.abs(allocated - cap) < 0.01) return "text-emerald-400";
         if (allocated > cap) return "text-red-400";
         return "text-white";
     };
 
+    const getConsultantHeaderDetailClass = (resourceId: string) => {
+        const cap = Number(billableCapacityByResource[resourceId] ?? 0);
+        const allocated = Number(totals.hoursByResource[resourceId] ?? 0);
+        const bothZero = Math.abs(allocated) < 0.01 && Math.abs(cap) < 0.01;
+        if (bothZero) return "text-white";
+        if (Math.abs(allocated - cap) < 0.01) return "text-emerald-400";
+        if (Math.abs(allocated) > 0.01 || Math.abs(cap) > 0.01) return "text-amber-300";
+        return "text-white";
+    };
+
     const getClientStatusClass = (total: number, wkMin: number, wkMax: number) => {
         if (total < wkMin) return "text-white";
-        if (wkMax <= 0) return "text-emerald-400";
-        if (total > wkMax) return "text-red-400";
+        if (wkMax > 0 && total > wkMax) return "text-red-400";
         return "text-emerald-400";
     };
 
-    const getClientMetaLineClass = (total: number, wkMax: number) => {
+    const getClientMetaLineClass = (total: number, wkMin: number, wkMax: number) => {
+        if (total < wkMin) return "text-slate-300";
         if (wkMax > 0 && total > wkMax) return "text-red-300";
-        return "text-text-muted";
+        return "text-emerald-300";
     };
 
-    const getScopeLabels = useCallback((scopeType: string, scopeId: string) => {
+    const getClientMaxStatusLabel = (total: number, wkMax: number) => {
+        if (wkMax <= 0) return "No Max Set";
+        const diff = Number((total - wkMax).toFixed(1));
+        if (Math.abs(diff) < 0.05) return "On Max";
+        if (diff > 0) return `${diff.toFixed(1)} Over Max`;
+        return `${Math.abs(diff).toFixed(1)} Under Max`;
+    };
+
+    const getClientMaxStatusClass = (total: number, wkMin: number, wkMax: number) => {
+        if (wkMax <= 0) return "text-text-muted";
+        if (total < wkMin) return "text-white";
+        if (total > wkMax) return "text-red-300";
+        return "text-emerald-300";
+    };
+
+    const getScopeLabels = useCallback((scopeType: string, scopeId: string, sourceTaskId?: string | null) => {
+        const sourceTask = sourceTaskId ? sourceTaskById.get(String(sourceTaskId).trim()) ?? null : null;
+        if (sourceTask && (scopeType === "all" || scopeId === "all")) {
+            const taskLabels = getTaskScopeLabels(sourceTask);
+            if (taskLabels.length > 0) return taskLabels;
+        }
         if (scopeType === "list") {
             const match = folders.flatMap((folder) => folder.lists).find((list) => String(list.id) === String(scopeId));
             return [match?.name ?? scopeId].filter(Boolean);
@@ -608,11 +657,12 @@ export function CapacityGrid({
             return [match?.name ?? scopeId].filter(Boolean);
         }
         return [scopeId].filter(Boolean);
-    }, [folders]);
+    }, [folders, sourceTaskById]);
 
     const getBillableActualsForCell = useCallback((row: CapacityGridRow, resource: CapacityGridResource) => {
         const rowClientKey = normalizeName(String(row.client || ""));
-        if (!rowClientKey) return 0;
+        const rowIdKey = normalizeName(String(row.id || ""));
+        if (!rowClientKey && !rowIdKey) return 0;
 
         const resourceFullKey = normalizeName(String(resource.name || ""));
         const resourceFirstKey = normalizeName(String(resource.name || "").split(/\s+/)[0] || "");
@@ -629,12 +679,18 @@ export function CapacityGrid({
             );
             if (!consultantMatch) return sum;
 
-            const scopeMatches = getScopeLabels(String(rollup.scopeType || ""), String(rollup.scopeId || "")).some((label) => {
+            const scopeMatches = getScopeLabels(
+                String(rollup.scopeType || ""),
+                String(rollup.scopeId || ""),
+                rollup.sourceTaskId
+            ).some((label) => {
                 const labelKey = normalizeName(label);
                 return labelKey.length > 0 && (
                     labelKey === rowClientKey
+                    || labelKey === rowIdKey
                     || labelKey.includes(rowClientKey)
                     || rowClientKey.includes(labelKey)
+                    || (rowIdKey.length > 0 && (labelKey.includes(rowIdKey) || rowIdKey.includes(labelKey)))
                 );
             });
 
@@ -1000,14 +1056,14 @@ export function CapacityGrid({
                                             <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">Consultant</span>
                                             <span
                                                 title={resource.name}
-                                                className={cn("max-w-full truncate text-center text-[14px] font-semibold leading-4 transition-colors whitespace-nowrap", getConsultantHeaderClass(resource.id))}
+                                                className={cn("max-w-full truncate text-center text-[14px] font-semibold leading-4 transition-colors whitespace-nowrap", getConsultantHeaderNameClass(resource.id))}
                                             >
                                                 {displayName}
                                             </span>
-                                            <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderClass(resource.id))}>
+                                            <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderDetailClass(resource.id))}>
                                                 Planned {used.toFixed(1)}
                                             </span>
-                                            <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderClass(resource.id))}>
+                                            <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderDetailClass(resource.id))}>
                                                 Total Capacity {maxBillable.toFixed(1)}
                                             </span>
                                         </div>
@@ -1040,8 +1096,11 @@ export function CapacityGrid({
                                     <td className={cn("px-2 py-2 border-r", laneBorderClass, clientBodyStickyClass, clientLaneClass)}>
                                         <div className={cn("w-56 rounded-xl border border-white/[0.04] bg-white/[0.03] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]", clientStatusClass)}>
                                             <div className={cn("font-medium", rowMax > 0 && rowTotal > rowMax ? "text-red-400" : clientStatusClass)}>{clientMeta?.name ?? row.client}</div>
-                                            <div className={cn("mt-1 text-[10px] uppercase tracking-[0.18em]", getClientMetaLineClass(rowTotal, rowMax))}>
+                                            <div className={cn("mt-1 text-[10px] uppercase tracking-[0.18em]", getClientMetaLineClass(rowTotal, rowMin, rowMax))}>
                                                 Team {(clientMeta?.team ?? row.team) || "-"} · {clientMeta?.sa || row.teamSa || "No SA"} · {clientMeta?.dealType || row.dealType || "No Deal Type"}
+                                            </div>
+                                            <div className={cn("mt-1 text-[10px] font-semibold uppercase tracking-[0.18em]", getClientMaxStatusClass(rowTotal, rowMin, rowMax))}>
+                                                {getClientMaxStatusLabel(rowTotal, rowMax)}
                                             </div>
                                         </div>
                                     </td>
@@ -1055,9 +1114,14 @@ export function CapacityGrid({
                                                 const allocationNote = String(row.allocations[resource.id]?.note ?? "");
                                                 const clientBoardHref = resolveClientBoardHref(row, resource, resource.name);
                                                 const plannedVsActualMatch = Math.abs(plannedHours - actualHours) < 0.05;
-                                                const heatMapClass = plannedVsActualMatch
+                                                const bothZero = Math.abs(plannedHours) < 0.05 && Math.abs(actualHours) < 0.05;
+                                                const heatMapClass = gridMode !== "view"
                                                     ? "bg-slate-700/35 border-slate-500/45 text-slate-100"
-                                                    : "bg-slate-600/35 border-slate-400/55 text-white";
+                                                    : bothZero
+                                                        ? "bg-slate-700/35 border-slate-500/45 text-slate-100"
+                                                        : plannedVsActualMatch
+                                                            ? "bg-emerald-500/16 border-emerald-300/40 text-emerald-50"
+                                                            : "bg-amber-400/16 border-amber-300/45 text-amber-50";
                                                 const noteHighlightClass = allocationNote
                                                     ? "ring-2 ring-slate-300/45 border-slate-300/60 shadow-[0_0_0_1px_rgba(203,213,225,0.16)]"
                                                     : "";
