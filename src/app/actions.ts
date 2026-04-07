@@ -7,6 +7,8 @@ import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
+import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
 import {
@@ -83,7 +85,55 @@ export interface ClientDirectoryRecord {
     isActive: boolean;
     isInternal: boolean;
     sortOrder: number;
+    contacts: ClientDirectoryContact[];
 }
+
+export interface ClientDirectoryContact {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    role: string;
+}
+
+export interface ClientDashboardNarrativeInput {
+    clientId: string;
+    clientName: string;
+    viewMode: "weekly" | "monthly";
+    periodStart: string;
+    periodEnd: string;
+    tasks: Array<{
+        id: string;
+        name: string;
+        description?: string;
+        listName?: string;
+        assignees?: string;
+        status?: string;
+    }>;
+    timeEntries: Array<{
+        id: string;
+        taskId: string;
+        hours: number;
+        assignee?: string;
+    }>;
+}
+
+export interface ClientDashboardNarrativeResult {
+    detailedWorkPerformed: string;
+    valueDelivered: string;
+    source: "llm" | "fallback";
+    generatedAt: string;
+}
+
+export const STANDARD_CLIENT_ROLES = [
+    "Primary Contact",
+    "Secondary Contact",
+    "Billing Contact",
+    "Project Sponsor",
+    "Project Manager",
+    "Technical Contact",
+    "Operations Contact",
+];
 
 type LegacyClientDefaults = {
     name: string;
@@ -312,7 +362,47 @@ function mapClientDirectory(row: any): ClientDirectoryRecord {
         isActive: Boolean(row.isActive ?? true),
         isInternal: Boolean(row.isInternal ?? false),
         sortOrder: Number(row.sortOrder ?? 0),
+        contacts: normalizeClientDirectoryContacts(row?.contacts),
     };
+}
+
+function normalizeClientDirectoryContact(value: any): ClientDirectoryContact | null {
+    if (!value || typeof value !== "object") return null;
+    const firstName = String(value.firstName ?? "").trim();
+    const lastName = String(value.lastName ?? "").trim();
+    const email = String(value.email ?? "").trim();
+    const roleRaw = String(value.role ?? "").trim();
+
+    if (!firstName && !lastName && !email && !roleRaw) return null;
+
+    return {
+        id: String(value.id ?? randomBytes(10).toString("hex")).trim(),
+        firstName,
+        lastName,
+        email,
+        role: roleRaw || STANDARD_CLIENT_ROLES[0],
+    };
+}
+
+function normalizeClientDirectoryContacts(value: any): ClientDirectoryContact[] {
+    const rows = Array.isArray(value) ? value : [];
+    const normalized = rows
+        .map((row) => normalizeClientDirectoryContact(row))
+        .filter((row): row is ClientDirectoryContact => Boolean(row));
+    return normalized;
+}
+
+function normalizeContactInputForSave(raw: any): ClientDirectoryContact[] {
+    if (!Array.isArray(raw)) return [];
+    return normalizeClientDirectoryContacts(raw).map((contact, index) => {
+        const email = contact.email.toLowerCase();
+        const id = String(contact.id ?? `contact-${index + 1}`).trim() || `contact-${index + 1}`;
+        return {
+            ...contact,
+            id,
+            email,
+        };
+    });
 }
 
 function buildLegacyClientDefaults(rows: any[]): Map<string, LegacyClientDefaults> {
@@ -1179,6 +1269,7 @@ export async function saveClientDirectoryEntry(input: {
     isActive?: boolean;
     isInternal?: boolean;
     sortOrder?: number | null;
+    contacts?: ClientDirectoryContact[];
 }) {
     const clientDirectoryModel = (prisma as any).clientDirectory;
     if (!clientDirectoryModel) return null;
@@ -1211,6 +1302,7 @@ export async function saveClientDirectoryEntry(input: {
             isActive: input.isActive !== false,
             isInternal: Boolean(input.isInternal ?? false),
             sortOrder: input.sortOrder == null ? 0 : Number(input.sortOrder),
+            contacts: normalizeContactInputForSave(input.contacts),
         },
         create: {
             id,
@@ -1223,6 +1315,7 @@ export async function saveClientDirectoryEntry(input: {
             isActive: input.isActive !== false,
             isInternal: Boolean(input.isInternal ?? false),
             sortOrder: input.sortOrder == null ? 0 : Number(input.sortOrder),
+            contacts: normalizeContactInputForSave(input.contacts),
         },
     });
 
@@ -1245,6 +1338,117 @@ export async function deleteClientDirectoryEntry(clientId: string) {
     revalidatePath("/");
     revalidatePath("/settings");
     return { ok: true };
+}
+
+function buildFallbackNarratives(args: ClientDashboardNarrativeInput): ClientDashboardNarrativeResult {
+    const totalHours = args.timeEntries.reduce((sum, entry) => sum + Number(entry.hours || 0), 0);
+    const byTask = new Map<string, number>();
+    args.timeEntries.forEach((entry) => {
+        const key = String(entry.taskId || "untagged");
+        byTask.set(key, (byTask.get(key) || 0) + (Number(entry.hours) || 0));
+    });
+
+    const taskLines = args.tasks.length > 0
+        ? args.tasks.map((task, index) => {
+            const hours = byTask.get(String(task.id)) || 0;
+            const description = task.description ? ` — ${task.description.slice(0, 200).trim()}` : "";
+            const assignees = task.assignees ? ` (${task.assignees})` : "";
+            return `${index + 1}. ${task.name}${description}${assignees}${hours > 0 ? ` · ${hours.toFixed(1)}h` : ""}`;
+        }).join("\n")
+        : `No task records were found for ${args.clientName} in the selected ${args.viewMode}.`;
+
+    const valueLines = args.timeEntries.length > 0
+        ? [
+            `${totalHours.toFixed(1)} actual hours were delivered for ${args.clientName} in the selected period.`,
+            `${args.timeEntries.length} time entry records were used to build this breakdown.`,
+            `Representative work: ${args.tasks.slice(0, 3).map((task) => task.name).join(", ") || "No tasks"}.`,
+        ].join("\n")
+        : `No billable activity was posted for ${args.clientName} in the selected ${args.viewMode}.`;
+
+    return {
+        detailedWorkPerformed: taskLines,
+        valueDelivered: valueLines,
+        source: "fallback",
+        generatedAt: new Date().toISOString(),
+    };
+}
+
+function extractTaskText(task: { name: string; description?: string; status?: string; listName?: string; assignees?: string }) {
+    const status = String(task.status || "open").trim();
+    const assigneeLabel = task.assignees ? ` (Owner: ${task.assignees})` : "";
+    const bucket = task.listName ? ` [${task.listName}]` : "";
+    const description = task.description ? ` ${task.description.slice(0, 500).trim()}` : "";
+    return `${task.name}${bucket}${assigneeLabel} (${status})${description}`;
+}
+
+export async function generateClientDashboardNarratives(input: ClientDashboardNarrativeInput): Promise<ClientDashboardNarrativeResult> {
+    const clean: ClientDashboardNarrativeInput = {
+        clientId: String(input.clientId || "").trim(),
+        clientName: String(input.clientName || "Client").trim(),
+        viewMode: input.viewMode === "monthly" ? "monthly" : "weekly",
+        periodStart: String(input.periodStart || "").trim(),
+        periodEnd: String(input.periodEnd || "").trim(),
+        tasks: (Array.isArray(input.tasks) ? input.tasks : [])
+            .filter((task) => String(task?.name || "").trim().length > 0)
+            .map((task) => ({
+                id: String(task.id || "").trim(),
+                name: String(task.name || "").trim(),
+                description: String(task.description || "").trim(),
+                listName: String(task.listName || "").trim(),
+                assignees: String(task.assignees || ""),
+                status: String(task.status || "").trim(),
+            })),
+        timeEntries: (Array.isArray(input.timeEntries) ? input.timeEntries : []).map((entry) => ({
+            id: String(entry?.id || "").trim(),
+            taskId: String(entry?.taskId || "").trim(),
+            hours: Number(entry?.hours || 0),
+            assignee: String(entry?.assignee || "").trim(),
+        })),
+    };
+
+    if (!clean.clientId || !clean.clientName) {
+        return buildFallbackNarratives(clean);
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+        return buildFallbackNarratives(clean);
+    }
+
+    const totalHours = clean.timeEntries.reduce((sum, entry) => sum + Number(entry.hours || 0), 0);
+    const lines = clean.tasks.map((task, index) => `Task ${index + 1}: ${extractTaskText(task)}`);
+    const prompt = `You are generating executive reporting text for a client status dashboard.
+Create concise, client-facing language using the source data below.
+Client: ${clean.clientName}
+Period: ${clean.viewMode} (${clean.periodStart} - ${clean.periodEnd})
+Total actual hours: ${totalHours.toFixed(1)}
+
+Task context:
+${lines.slice(0, 40).join("\n")}
+
+Return ONLY valid JSON in this exact shape with short plain-English copy:
+{
+  "detailedWorkPerformed": "A concise paragraph or 3-5 bullets summarized from task names/description.",
+  "valueDelivered": "A concise paragraph describing business/client value delivered this period."
+}`;
+
+    try {
+        const { text } = await generateText({
+            model: openai(process.env.OPENAI_MODEL || "gpt-4o-mini"),
+            prompt,
+        });
+        const parsed = JSON.parse(text || "{}") as { detailedWorkPerformed?: string; valueDelivered?: string };
+        const detailedWorkPerformed = String(parsed.detailedWorkPerformed || "").trim() || buildFallbackNarratives(clean).detailedWorkPerformed;
+        const valueDelivered = String(parsed.valueDelivered || "").trim() || buildFallbackNarratives(clean).valueDelivered;
+
+        return {
+            detailedWorkPerformed,
+            valueDelivered,
+            source: "llm",
+            generatedAt: new Date().toISOString(),
+        };
+    } catch {
+        return buildFallbackNarratives(clean);
+    }
 }
 
 export async function updateClientConfig(week: string, clientId: string, data: { clientName?: string, orderIndex?: number, team?: number, sa?: string, dealType?: string, min?: number, max?: number, target?: number, mtHrs?: number, wPlusHrs?: number }) {

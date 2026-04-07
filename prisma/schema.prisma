@@ -54,6 +54,7 @@ model ClientDirectory {
   isActive  Boolean  @default(true)
   isInternal Boolean @default(false)
   sortOrder Int      @default(0)
+  contacts  Json     @default("[]")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
