@@ -1,36 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { getNetSuiteConfigFromEnv, getNetSuiteConsultantPathFromEnv, syncNetSuiteConsultants } from "@/lib/netsuite";
+import {
+    getNetSuiteConfigFromEnv,
+    getNetSuiteDiscoveryDeployIdFromEnv,
+    getNetSuiteDiscoveryScriptIdFromEnv,
+    getNetSuiteRestletPathFromEnv,
+    syncNetSuiteConsultants,
+} from "@/lib/netsuite";
+import { isNetSuiteSyncAuthorized } from "@/app/api/integrations/netsuite/route-utils";
 
 export const dynamic = "force-dynamic";
 
 const syncRequestSchema = z.object({
     dryRun: z.boolean().optional(),
-    path: z.string().trim().min(1).optional(),
+    department: z.number().int().positive().optional(),
+    supervisor: z.number().int().positive().optional(),
 });
 
-function getSyncTokenFromRequest(request: NextRequest): string {
-    const authHeader = String(request.headers.get("authorization") || "").trim();
-    if (authHeader.toLowerCase().startsWith("bearer ")) {
-        return authHeader.slice(7).trim();
-    }
-    return String(request.headers.get("x-sync-token") || "").trim();
-}
-
-function isSyncAuthorized(request: NextRequest): boolean {
-    const expected = String(process.env.NETSUITE_SYNC_TOKEN || "").trim();
-    if (!expected) return true;
-    return getSyncTokenFromRequest(request) === expected;
-}
-
 export async function GET() {
-    const { missing } = getNetSuiteConfigFromEnv();
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    const discoveryPreviewPath = config
+        ? `${config.baseUrl}${getNetSuiteRestletPathFromEnv()}?script=${getNetSuiteDiscoveryScriptIdFromEnv()}&deploy=${getNetSuiteDiscoveryDeployIdFromEnv()}&action=listEmployees&limit=1&offset=0`
+        : null;
 
     return NextResponse.json(
         {
             ok: missing.length === 0,
-            consultantPath: getNetSuiteConsultantPathFromEnv(),
+            restletPath: getNetSuiteRestletPathFromEnv(),
+            discoveryScriptId: getNetSuiteDiscoveryScriptIdFromEnv(),
+            discoveryDeployId: getNetSuiteDiscoveryDeployIdFromEnv(),
+            previewEndpoint: discoveryPreviewPath,
             missing,
             syncTokenConfigured: Boolean(String(process.env.NETSUITE_SYNC_TOKEN || "").trim()),
         },
@@ -44,7 +44,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-    if (!isSyncAuthorized(request)) {
+    if (!isNetSuiteSyncAuthorized(request)) {
         return NextResponse.json(
             {
                 ok: false,
@@ -79,8 +79,9 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await syncNetSuiteConsultants({
-        path: payload.path,
         dryRun: payload.dryRun,
+        department: payload.department,
+        supervisor: payload.supervisor,
     });
 
     if (result.ok && !result.dryRun) {

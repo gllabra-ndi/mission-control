@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,7 +21,7 @@ const strictConsole = args.has("--strict-console") || process.env.SMOKE_STRICT_C
 const reuseServer = args.has("--reuse-server") || process.env.SMOKE_REUSE_SERVER === "true";
 const timestamp = Date.now();
 const smokeDistDir = process.env.NEXT_DIST_DIR?.trim() || `.next-smoke-${port}-${timestamp}`;
-const smokeDbSource = path.resolve(repoRoot, process.env.SMOKE_DB_SOURCE || "dev.db");
+const smokeDbSource = path.resolve(repoRoot, process.env.SMOKE_DB_SOURCE || "prisma/dev.db");
 
 const serverStdout = [];
 const serverStderr = [];
@@ -309,17 +309,6 @@ async function selectDifferentOption(page, selector) {
     }, selector);
 }
 
-async function setInputValue(page, selector, value) {
-    await page.waitForSelector(selector, { timeout: 30000 });
-    await page.$eval(selector, (element, nextValue) => {
-        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return;
-        element.focus();
-        element.value = String(nextValue);
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        element.dispatchEvent(new Event("change", { bubbles: true }));
-    }, value);
-}
-
 async function typeIntoField(page, selector, value) {
     await page.waitForSelector(selector, { timeout: 30000 });
     await page.click(selector, { clickCount: 3 });
@@ -388,11 +377,11 @@ async function runSmoke(page, issues) {
 
         const tabChecks = [
             { navText: "Command Center", tabId: "command-center", expectedText: "Command Center" },
-            { navText: "Billing Trends", tabId: "trends", expectedText: "Billing Trends" },
+            { navText: "Actuals Trends", tabId: "trends", expectedText: "Billing Trends" },
             { navText: "Capacity Trends", tabId: "capacity-trends", expectedText: "Capacity Trends" },
             { navText: "Consultant Utilization", tabId: "consultant-utilization", expectedText: "Consultant Utilization" },
             { navText: "Timesheets", tabId: "timesheets", expectedText: "Timesheets" },
-            { navText: "Capacity Grid", tabId: "capacity-grid", expectedText: "Capacity Grid" },
+            { navText: "Plan vs Actuals", tabId: "capacity-grid", expectedText: "Plan vs Actuals" },
             { navText: "Client Setup", tabId: "client-setup", expectedText: "Client Setup" },
             { navText: "Backlog Growth", tabId: "backlog-growth", expectedText: "Backlog Growth" },
         ];
@@ -498,7 +487,7 @@ async function runSmoke(page, issues) {
             const startingWeek = await getUrlSearchParam(page, "week");
             await clickByAriaLabel(page, "Previous week");
             await waitForUrlSearchParamChange(page, "week", startingWeek);
-            await waitForMainText(page, "Remaining To Bill", 30000);
+            await waitForMainText(page, "Remaining Planned", 30000);
         });
 
         await runStep("Settings Page", async () => {
@@ -514,25 +503,26 @@ async function runSmoke(page, issues) {
         await runStep("Capacity Grid -> Editable Tasks", async () => {
             await page.goto(`${baseUrl}/?tab=capacity-grid`, { waitUntil: "domcontentloaded", timeout: 120000 });
             console.log(`[smoke] Capacity Grid direct load -> ${page.url()}`);
-            await waitForTab(page, "capacity-grid", "Capacity Grid");
+            await waitForTab(page, "capacity-grid", "Plan vs Actuals");
             const openedBoard = await clickFirstTaskBoardButton(page);
             assert(openedBoard, "No Capacity Grid task board buttons were available to test");
             console.log(`[smoke] Task board click -> ${page.url()}`);
             boardAssignee = await getUrlSearchParam(page, "assignee");
-            await waitForTab(page, "issues", "Editable Tasks");
+            await waitForTab(page, "issues", "Add Task");
         });
 
-        await runStep("Editable Task Creation", async () => {
+        await runStep("Editable Task Draft Flow", async () => {
             const beforeText = await readMainText(page);
             const beforeCount = parseEditableTaskCount(beforeText);
             await clickByExactText(page, null, "Add Task");
-            await waitForMainText(page, "New Task", 30000);
+            await waitForMainText(page, "Save Task", 30000);
             const afterText = await readMainText(page);
             const afterCount = parseEditableTaskCount(afterText);
             assert(
-                (beforeCount !== null && afterCount !== null && afterCount === beforeCount + 1) || afterText.includes("New Task"),
-                "Add Task did not create a visible task in the editable board"
+                beforeCount === null || afterCount === null || afterCount === beforeCount,
+                "Draft task should not appear on the board before Save Task is clicked"
             );
+            await clickByExactText(page, null, "Discard Draft");
         });
 
         const centeredEditorVisible = await page.evaluate(() => {
@@ -545,6 +535,41 @@ async function runSmoke(page, issues) {
             await clickByExactText(page, null, "Close task editor");
         }
 
+        await runStep("Editable Task Estimate Persistence", async () => {
+            await page.waitForFunction(
+                () => document.querySelectorAll("[draggable='true']").length > 0,
+                { timeout: 30000 }
+            );
+            await page.$eval("[draggable='true']", (element) => {
+                if (element instanceof HTMLElement) element.click();
+            });
+            await waitForMainText(page, "Save Task", 30000);
+            const selector = "input[inputmode='decimal']";
+            const originalValue = await page.$eval(selector, (element) => {
+                if (!(element instanceof HTMLInputElement)) return "";
+                return element.value;
+            });
+            const nextValue = String(Number((Number(originalValue || "0") + 0.25).toFixed(2)));
+            await typeIntoField(page, selector, nextValue);
+            await clickByExactText(page, null, "Save Task");
+            await sleep(1000);
+            const boardUrl = page.url();
+            await page.goto(boardUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+            await page.waitForFunction(
+                () => document.querySelectorAll("[draggable='true']").length > 0,
+                { timeout: 30000 }
+            );
+            await page.$eval("[draggable='true']", (element) => {
+                if (element instanceof HTMLElement) element.click();
+            });
+            await waitForMainText(page, "Save Task", 30000);
+            const persistedValue = await page.$eval(selector, (element) => {
+                if (!(element instanceof HTMLInputElement)) return "";
+                return element.value;
+            });
+            assert.equal(Number(persistedValue), Number(nextValue), "Task estimate did not persist after reopening the board");
+        });
+
         await runStep("Editable Tasks -> Capacity Grid", async () => {
             const returnToHref = await page.evaluate(() => {
                 const params = new URLSearchParams(window.location.search);
@@ -555,24 +580,23 @@ async function runSmoke(page, issues) {
                 waitUntil: "domcontentloaded",
                 timeout: 120000,
             });
-            await waitForTab(page, "capacity-grid", "Capacity Grid");
+            await waitForTab(page, "capacity-grid", "Plan vs Actuals");
         });
 
         await runStep("Capacity Grid Note Editor", async () => {
             await page.goto(`${baseUrl}/?tab=capacity-grid`, { waitUntil: "domcontentloaded", timeout: 120000 });
-            await waitForTab(page, "capacity-grid", "Capacity Grid");
+            await waitForTab(page, "capacity-grid", "Plan vs Actuals");
             await openFirstCapacityGridNoteEditor(page);
             await page.waitForFunction(
                 () => document.body?.textContent?.includes("Save Note"),
                 { timeout: 30000 }
             );
             const noteValue = `Smoke note ${Date.now()}`;
-            await setInputValue(page, "textarea", noteValue);
+            await typeIntoField(page, "textarea", noteValue);
             await clickByExactText(page, null, "Save Note");
             await page.waitForFunction(
-                (text) => !document.body?.textContent?.includes("Planning Context") || !document.querySelector("textarea"),
+                () => !document.querySelector("textarea"),
                 { timeout: 30000 },
-                noteValue
             );
             await openFirstCapacityGridNoteEditor(page);
             await page.waitForFunction(
@@ -598,7 +622,9 @@ async function runSmoke(page, issues) {
             await typeIntoField(page, '[data-client-row^="new-"] td:nth-child(6) input', "12");
             await clickNewClientRowSave(page);
             await page.waitForFunction(
-                (name) => document.body?.textContent?.includes(name),
+                (name) => Array.from(document.querySelectorAll('[data-client-row] input[placeholder="Client name"]')).some((input) => {
+                    return input instanceof HTMLInputElement && input.value === name;
+                }),
                 { timeout: 30000 },
                 uniqueName
             );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition, type FocusEvent } from "react";
 import { useRouter } from "next/navigation";
 import { addDays, addWeeks, format, startOfWeek, subWeeks } from "date-fns";
 import { ChevronLeft, ChevronRight, GripVertical, Paperclip, Plus, Save, Trash2, Upload, X } from "lucide-react";
@@ -21,6 +21,12 @@ import {
     updateEditableTaskBillableEntry,
 } from "@/app/actions";
 import { ClickUpTask } from "@/lib/clickup";
+import {
+    buildEditableTaskSeedFromClickUp,
+    getEffectiveEditableTaskStatus,
+    isEditableTaskVisibleInWeek,
+    normalizeDateKey,
+} from "@/lib/editableTaskLifecycle";
 import { cn } from "@/lib/utils";
 
 interface EditableTaskBoardProps {
@@ -35,17 +41,23 @@ interface EditableTaskBoardProps {
     tabId?: string;
     onNavigateWeek?: (nextWeek: string) => void;
     onAssigneeFilterChange?: (assignee: string | null) => void;
+    weekDataVersion?: number;
+    onWeekDataRefresh?: () => Promise<void> | void;
 }
 
 type EditableStatus = "backlog" | "open" | "closed";
 
 type EditableTaskFormState = {
     id: string;
+    isDraft: boolean;
     subject: string;
     description: string;
     assignee: string;
     isAi: boolean;
     week: string;
+    plannedWeek: string;
+    closedDate: string;
+    estimateHours: number;
     status: EditableStatus;
 };
 
@@ -53,7 +65,7 @@ type TaskEditorTab = "details" | "billable";
 
 type BillableEntryDraft = {
     entryDate: string;
-    hours: number;
+    hours: string;
     note: string;
     isValueAdd: boolean;
 };
@@ -64,50 +76,25 @@ const STATUS_COLUMNS: Array<{ id: EditableStatus; label: string }> = [
     { id: "closed", label: "Closed" },
 ];
 
-function normalizeEditableStatusFromClickUp(task: ClickUpTask): EditableStatus {
-    const statusText = String(task?.status?.status ?? "").toLowerCase();
-    const statusType = String(task?.status?.type ?? "").toLowerCase();
-    if (statusType === "closed" || /(complete|completed|done|closed|resolved|shipped)/.test(statusText)) return "closed";
-    if (/(backlog|not started|todo|to do|new|queued|queue|planned|plan|pending)/.test(statusText)) return "backlog";
-    return "open";
+const NEW_TASK_DRAFT_ID = "draft:new-task";
+
+function sanitizeDecimalDraft(value: string) {
+    const sanitized = String(value || "").replace(/[^0-9.]/g, "");
+    const firstDotIndex = sanitized.indexOf(".");
+    if (firstDotIndex === -1) return sanitized;
+    return `${sanitized.slice(0, firstDotIndex + 1)}${sanitized.slice(firstDotIndex + 1).replace(/\./g, "")}`;
 }
 
-function toValidDate(rawValue: string | number | null | undefined): Date | null {
-    const raw = Number(rawValue ?? 0);
-    if (!Number.isFinite(raw) || raw <= 0) return null;
-    const parsed = new Date(raw);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+function formatEditableNumber(value: number | string | null | undefined) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(numeric) : "";
 }
 
-function toWeekStartStr(date: Date): string {
-    return format(startOfWeek(date, { weekStartsOn: 1 }), "yyyy-MM-dd");
-}
-
-function getTaskWeekStr(task: ClickUpTask, activeWeekStr: string): string {
-    const activeWeekDate = new Date(`${activeWeekStr}T00:00:00`);
-    const activeWeekEnd = addDays(activeWeekDate, 6);
-    const startDate = toValidDate(task?.start_date);
-    const dueDate = toValidDate(task?.due_date);
-    const closedDate = toValidDate(task?.date_closed);
-    const createdDate = toValidDate(task?.date_created);
-
-    if (startDate && dueDate) {
-        const rangeStart = startDate <= dueDate ? startDate : dueDate;
-        const rangeEnd = startDate <= dueDate ? dueDate : startDate;
-        if (rangeStart <= activeWeekEnd && rangeEnd >= activeWeekDate) {
-            return activeWeekStr;
-        }
-    }
-
-    if (startDate && toWeekStartStr(startDate) === activeWeekStr) return activeWeekStr;
-    if (dueDate && toWeekStartStr(dueDate) === activeWeekStr) return activeWeekStr;
-    if (closedDate && toWeekStartStr(closedDate) === activeWeekStr) return activeWeekStr;
-
-    if (startDate) return toWeekStartStr(startDate);
-    if (dueDate) return toWeekStartStr(dueDate);
-    if (closedDate) return toWeekStartStr(closedDate);
-    if (createdDate) return toWeekStartStr(createdDate);
-    return "";
+function selectInputValueOnFocus(event: FocusEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    requestAnimationFrame(() => {
+        input.select();
+    });
 }
 
 function normalizeScopeValue(value: string): string {
@@ -160,18 +147,7 @@ function buildSeedTasks(
     tasks: ClickUpTask[],
     activeWeekStr: string
 ): EditableTaskSeed[] {
-    return tasks
-        .map((task) => ({
-            sourceTaskId: String(task.id),
-            subject: String(task.name ?? "Untitled Task"),
-            description: "",
-            assignee: Array.isArray(task.assignees) && task.assignees.length > 0
-                ? String(task.assignees[0]?.username ?? "")
-                : "",
-            week: getTaskWeekStr(task, activeWeekStr) || activeWeekStr,
-            status: normalizeEditableStatusFromClickUp(task),
-        }))
-        .filter((task) => task.week === activeWeekStr);
+    return tasks.map((task) => buildEditableTaskSeedFromClickUp(task, activeWeekStr));
 }
 
 function toWeekStart(value: string): string {
@@ -180,12 +156,28 @@ function toWeekStart(value: string): string {
     return format(startOfWeek(parsed, { weekStartsOn: 1 }), "yyyy-MM-dd");
 }
 
+function normalizeEstimateHours(value: number | string | null | undefined): number {
+    const normalized = Number(value ?? 0);
+    if (!Number.isFinite(normalized)) return 0;
+    return Number(Math.max(0, normalized).toFixed(2));
+}
+
 function getDefaultBillableEntryDate(activeWeekStr: string): string {
     const start = new Date(`${activeWeekStr}T00:00:00`);
     const end = addDays(start, 4);
     const today = new Date();
     const todayKey = format(today, "yyyy-MM-dd");
     if (today >= start && today <= end) return todayKey;
+    return activeWeekStr;
+}
+
+function getDefaultClosedDate(activeWeekStr: string): string {
+    const start = new Date(`${activeWeekStr}T00:00:00`);
+    const end = addDays(start, 6);
+    const today = new Date();
+    if (today >= start && today <= end) {
+        return format(today, "yyyy-MM-dd");
+    }
     return activeWeekStr;
 }
 
@@ -240,6 +232,8 @@ export function EditableTaskBoard({
     tabId = "issues",
     onNavigateWeek,
     onAssigneeFilterChange,
+    weekDataVersion = 0,
+    onWeekDataRefresh,
 }: EditableTaskBoardProps) {
     const router = useRouter();
     const [boardTasks, setBoardTasks] = useState<EditableTaskRecord[]>([]);
@@ -248,9 +242,10 @@ export function EditableTaskBoard({
     const [isCenteredEditorOpen, setIsCenteredEditorOpen] = useState(false);
     const [editorTab, setEditorTab] = useState<TaskEditorTab>("details");
     const [returnToHref, setReturnToHref] = useState<string | null>(null);
+    const [estimateHoursInput, setEstimateHoursInput] = useState("0");
     const [billableEntryDraft, setBillableEntryDraft] = useState<BillableEntryDraft>({
         entryDate: getDefaultBillableEntryDate(activeWeekStr),
-        hours: 0,
+        hours: "",
         note: "",
         isValueAdd: false,
     });
@@ -261,6 +256,7 @@ export function EditableTaskBoard({
     const [attachmentMessage, setAttachmentMessage] = useState<string | null>(null);
     const [boardDeleteOpen, setBoardDeleteOpen] = useState(false);
     const [folderDeleteOpen, setFolderDeleteOpen] = useState(false);
+    const [taskFinderQuery, setTaskFinderQuery] = useState("");
 
     const activeWeekDate = useMemo(() => new Date(`${activeWeekStr}T00:00:00`), [activeWeekStr]);
     const weekRangeLabel = `${format(activeWeekDate, "MMM d")} to ${format(addDays(activeWeekDate, 4), "MMM d")}`;
@@ -294,7 +290,7 @@ export function EditableTaskBoard({
         return () => {
             cancelled = true;
         };
-    }, [activeWeekStr, scopeType, scopeId, seedTasks]);
+    }, [activeWeekStr, scopeType, scopeId, seedTasks, weekDataVersion]);
 
     useEffect(() => {
         if (!selectedTaskId) {
@@ -309,17 +305,22 @@ export function EditableTaskBoard({
         }
         setEditorState({
             id: task.id,
+            isDraft: false,
             subject: task.subject,
             description: task.description,
             assignee: task.assignee,
             isAi: Boolean(task.isAi ?? false),
             week: task.week,
+            plannedWeek: task.plannedWeek || "",
+            closedDate: task.closedDate || "",
+            estimateHours: Number(task.estimateHours ?? 0),
             status: task.status,
         });
+        setEstimateHoursInput(formatEditableNumber(task.estimateHours ?? 0));
         setEditorTab("details");
         setBillableEntryDraft({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
-            hours: 0,
+            hours: "",
             note: "",
             isValueAdd: false,
         });
@@ -339,12 +340,19 @@ export function EditableTaskBoard({
             closed: [],
         };
         const normalizedAssigneeFilter = normalizeScopeValue(initialAssigneeFilter ?? "");
-        const visibleBoardTasks = normalizedAssigneeFilter
+        const normalizedTaskFinderQuery = normalizeScopeValue(taskFinderQuery);
+        const assigneeFilteredTasks = normalizedAssigneeFilter
             ? boardTasks.filter((task) => normalizeScopeValue(task.assignee) === normalizedAssigneeFilter)
             : boardTasks;
+        const visibleBoardTasks = normalizedTaskFinderQuery
+            ? assigneeFilteredTasks.filter((task) => {
+                const subjectKey = normalizeScopeValue(task.subject);
+                return subjectKey.includes(normalizedTaskFinderQuery);
+            })
+            : assigneeFilteredTasks;
 
         visibleBoardTasks.forEach((task) => {
-            map[task.status].push(task);
+            map[getEffectiveEditableTaskStatus(task, activeWeekStr)].push(task);
         });
         (Object.keys(map) as EditableStatus[]).forEach((status) => {
             map[status] = map[status].slice().sort((a, b) => {
@@ -362,30 +370,32 @@ export function EditableTaskBoard({
             });
         });
         return map;
-    }, [boardTasks, initialAssigneeFilter, scopeType, taskClientLabelBySourceTaskId]);
+    }, [activeWeekStr, boardTasks, initialAssigneeFilter, scopeType, taskClientLabelBySourceTaskId, taskFinderQuery]);
 
     const persistTaskUpdate = (taskId: string, patch: Partial<EditableTaskRecord>) => {
         setBoardTasks((prev) => prev.map((task) => (task.id === taskId ? { ...task, ...patch } : task)));
         startTransition(() => {
-            updateEditableTask(taskId, patch);
+            void updateEditableTask(taskId, patch).then(() => onWeekDataRefresh?.());
         });
     };
 
-    const handleCreateTask = async () => {
-        const created = await createEditableTask({
-            week: activeWeekStr,
-            scopeType,
-            scopeId,
+    const handleCreateTask = () => {
+        setSelectedTaskId(null);
+        setEditorState({
+            id: NEW_TASK_DRAFT_ID,
+            isDraft: true,
             subject: "New Task",
             description: "",
             assignee: String(initialAssigneeFilter ?? "").trim(),
             isAi: false,
-            billableHoursToday: 0,
+            week: activeWeekStr,
+            plannedWeek: "",
+            closedDate: "",
+            estimateHours: 0,
             status: "backlog",
         });
-        if (!created) return;
-        setBoardTasks((prev) => [...prev, created]);
-        setSelectedTaskId(created.id);
+        setEstimateHoursInput("0");
+        setEditorTab("details");
         setIsCenteredEditorOpen(true);
     };
 
@@ -394,6 +404,7 @@ export function EditableTaskBoard({
         if (selectedTaskId === taskId) setSelectedTaskId(null);
         setIsCenteredEditorOpen(false);
         await deleteEditableTask(taskId);
+        await onWeekDataRefresh?.();
     };
 
     const handleDropToStatus = (status: EditableStatus) => {
@@ -404,28 +415,91 @@ export function EditableTaskBoard({
             0,
             ...boardTasks.filter((task) => task.status === status && task.id !== dragTaskId).map((task) => Number(task.position || 0))
         ) + 1;
-        persistTaskUpdate(dragTaskId, { status, position: nextPosition });
+        const nextClosedDate = status === "closed" ? getDefaultClosedDate(activeWeekStr) : "";
+        persistTaskUpdate(dragTaskId, {
+            status,
+            position: nextPosition,
+            plannedWeek: status === "open"
+                ? (draggedTask.plannedWeek || activeWeekStr)
+                : status === "backlog"
+                    ? ""
+                    : draggedTask.plannedWeek,
+            closedDate: nextClosedDate,
+        });
         setDragTaskId(null);
+    };
+
+    const handleDiscardDraft = () => {
+        setEditorState(null);
+        setSelectedTaskId(null);
+        setIsCenteredEditorOpen(false);
     };
 
     const handleSaveEditor = () => {
         if (!editorState) return;
-        const normalizedWeek = toWeekStart(editorState.week);
-        const savedTaskId = editorState.id;
-        persistTaskUpdate(editorState.id, {
+        const normalizedWeek = editorState.isDraft
+            ? toWeekStart(editorState.week)
+            : toWeekStart(selectedTask?.week || editorState.week);
+        const candidatePlannedWeek = editorState.status === "open"
+            ? toWeekStart(editorState.plannedWeek || activeWeekStr)
+            : toWeekStart(editorState.plannedWeek || "");
+        const normalizedPlannedWeek = candidatePlannedWeek && candidatePlannedWeek < normalizedWeek
+            ? normalizedWeek
+            : candidatePlannedWeek;
+        const candidateClosedDate = editorState.status === "closed"
+            ? normalizeDateKey(editorState.closedDate || getDefaultClosedDate(activeWeekStr))
+            : "";
+        const normalizedClosedDate = candidateClosedDate && candidateClosedDate < normalizedWeek
+            ? normalizedWeek
+            : candidateClosedDate;
+        const persistedStatus: EditableStatus = normalizedClosedDate
+            ? "closed"
+            : normalizedPlannedWeek && normalizedPlannedWeek <= activeWeekStr
+                ? "open"
+                : "backlog";
+        const nextTaskPatch = {
             subject: editorState.subject.trim() || "Untitled Task",
             description: editorState.description,
             assignee: editorState.assignee,
             isAi: editorState.isAi,
             week: normalizedWeek,
-            status: editorState.status,
-        });
-        if (normalizedWeek !== activeWeekStr) {
+            plannedWeek: normalizedPlannedWeek,
+            closedDate: normalizedClosedDate,
+            estimateHours: normalizeEstimateHours(estimateHoursInput),
+            status: persistedStatus,
+        };
+
+        if (editorState.isDraft) {
+            startTransition(async () => {
+                const created = await createEditableTask({
+                    ...nextTaskPatch,
+                    scopeType,
+                    scopeId,
+                    billableHoursToday: 0,
+                });
+                if (!created) return;
+                if (isEditableTaskVisibleInWeek(created, activeWeekStr)) {
+                    setBoardTasks((prev) => [...prev, created]);
+                    setSelectedTaskId(created.id);
+                } else {
+                    setSelectedTaskId(null);
+                }
+                setEditorState(null);
+                setIsCenteredEditorOpen(false);
+                await onWeekDataRefresh?.();
+            });
+            return;
+        }
+
+        const savedTaskId = editorState.id;
+        persistTaskUpdate(editorState.id, nextTaskPatch);
+        if (!isEditableTaskVisibleInWeek({ week: normalizedWeek, closedDate: normalizedClosedDate }, activeWeekStr)) {
             setBoardTasks((prev) => prev.filter((task) => task.id !== editorState.id));
         }
         if (selectedTaskId === savedTaskId) {
             setSelectedTaskId(null);
         }
+        setEditorState(null);
         setIsCenteredEditorOpen(false);
     };
 
@@ -465,7 +539,7 @@ export function EditableTaskBoard({
         const created = await addEditableTaskBillableEntry({
             taskId: selectedTask.id,
             entryDate: billableEntryDraft.entryDate,
-            hours: Number(billableEntryDraft.hours ?? 0),
+            hours: normalizeEstimateHours(billableEntryDraft.hours),
             note: billableEntryDraft.note,
             isValueAdd: billableEntryDraft.isValueAdd,
         });
@@ -484,10 +558,11 @@ export function EditableTaskBoard({
         }));
         setBillableEntryDraft({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
-            hours: 0,
+            hours: "",
             note: "",
             isValueAdd: false,
         });
+        await onWeekDataRefresh?.();
     };
 
     const handleDeleteBillableEntry = async (entry: EditableTaskBillableEntryRecord) => {
@@ -499,6 +574,7 @@ export function EditableTaskBoard({
                 billableEntries: (task.billableEntries || []).filter((item) => item.id !== entry.id),
             };
         }));
+        await onWeekDataRefresh?.();
     };
 
     const handleToggleTaskAi = (task: EditableTaskRecord, nextValue: boolean) => {
@@ -520,6 +596,7 @@ export function EditableTaskBoard({
         }));
 
         await updateEditableTaskBillableEntry(entry.id, { isValueAdd: nextValue });
+        await onWeekDataRefresh?.();
     };
 
     const handleAttachmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -664,12 +741,50 @@ export function EditableTaskBoard({
                 </div>
             </label>
 
+            <div className="space-y-1 rounded-md border border-border bg-background/40 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wider text-text-muted">Created Week</div>
+                <div className="text-sm font-medium text-white">{editorState?.week ?? activeWeekStr}</div>
+                <div className="text-[11px] text-text-muted">Reference only. This does not change after the task is created.</div>
+            </div>
+
+            <div className="space-y-1 rounded-md border border-border bg-background/40 px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wider text-text-muted">Closed Date</div>
+                <div className="text-sm font-medium text-white">{editorState?.closedDate || "Open task"}</div>
+                <div className="text-[11px] text-text-muted">Set automatically when the task is closed and cleared if it is reopened.</div>
+            </div>
+
             <label className="block space-y-1">
-                <span className="text-[11px] uppercase tracking-wider text-text-muted">Week Of</span>
+                <span className="text-[11px] uppercase tracking-wider text-text-muted">Planned Week</span>
                 <input
                     type="date"
-                    value={editorState?.week ?? activeWeekStr}
-                    onChange={(event) => setEditorState((prev) => prev ? { ...prev, week: event.target.value } : prev)}
+                    value={editorState?.plannedWeek ?? ""}
+                    min={editorState?.week ?? activeWeekStr}
+                    onChange={(event) => setEditorState((prev) => prev ? {
+                        ...prev,
+                        plannedWeek: event.target.value && event.target.value < prev.week ? prev.week : event.target.value,
+                    } : prev)}
+                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                />
+                <div className="text-[11px] text-text-muted">
+                    Planned Week is when the task moves from Backlog into Open status and can seed Plan vs Actuals when the plan cell is still zero.
+                </div>
+            </label>
+
+            <label className="block space-y-1">
+                <span className="text-[11px] uppercase tracking-wider text-text-muted">Estimate (Hours)</span>
+                <input
+                    type="text"
+                    inputMode="decimal"
+                    value={estimateHoursInput}
+                    onFocus={selectInputValueOnFocus}
+                    onChange={(event) => setEstimateHoursInput(sanitizeDecimalDraft(event.target.value))}
+                    onBlur={() => {
+                        setEstimateHoursInput((prev) => (
+                            prev.trim().length > 0
+                                ? formatEditableNumber(normalizeEstimateHours(prev))
+                                : ""
+                        ));
+                    }}
                     className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                 />
             </label>
@@ -678,7 +793,21 @@ export function EditableTaskBoard({
                 <span className="text-[11px] uppercase tracking-wider text-text-muted">Status</span>
                 <select
                     value={editorState?.status ?? "backlog"}
-                    onChange={(event) => setEditorState((prev) => prev ? { ...prev, status: event.target.value as EditableStatus } : prev)}
+                    onChange={(event) => {
+                        const nextStatus = event.target.value as EditableStatus;
+                        setEditorState((prev) => prev ? {
+                            ...prev,
+                            status: nextStatus,
+                            plannedWeek: nextStatus === "open"
+                                ? (prev.plannedWeek || activeWeekStr)
+                                : nextStatus === "backlog" && prev.plannedWeek <= activeWeekStr
+                                    ? ""
+                                    : prev.plannedWeek,
+                            closedDate: nextStatus === "closed"
+                                ? (prev.closedDate || getDefaultClosedDate(activeWeekStr))
+                                : "",
+                        } : prev);
+                    }}
                     className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                 >
                     {STATUS_COLUMNS.map((column) => (
@@ -689,6 +818,13 @@ export function EditableTaskBoard({
                 </select>
             </label>
 
+            {editorState?.isDraft && (
+                <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-text-muted">
+                    The task stays as a draft until you click Save Task.
+                </div>
+            )}
+
+            {!editorState?.isDraft && (
             <div className="space-y-3 rounded-xl border border-border/60 bg-surface/20 p-4">
                 <div className="flex items-center justify-between gap-3">
                     <div>
@@ -754,6 +890,7 @@ export function EditableTaskBoard({
                     ))}
                 </div>
             </div>
+            )}
 
             <div className="flex items-center justify-between gap-2">
                 <button
@@ -767,11 +904,16 @@ export function EditableTaskBoard({
                 {editorState && (
                     <button
                         type="button"
-                        onClick={() => handleDeleteTask(editorState.id)}
-                        className="inline-flex items-center gap-2 rounded-md border border-red-500/30 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10"
+                        onClick={() => editorState.isDraft ? handleDiscardDraft() : handleDeleteTask(editorState.id)}
+                        className={cn(
+                            "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm",
+                            editorState.isDraft
+                                ? "border border-border/60 text-text-main hover:bg-surface-hover"
+                                : "border border-red-500/30 text-red-200 hover:bg-red-500/10"
+                        )}
                     >
-                        <Trash2 className="w-4 h-4" />
-                        Delete
+                        {editorState.isDraft ? <X className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
+                        {editorState.isDraft ? "Discard Draft" : "Delete"}
                     </button>
                 )}
             </div>
@@ -785,7 +927,7 @@ export function EditableTaskBoard({
         return (
             <div className="space-y-4">
                 <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-text-muted">
-                    Logged billable hours here will roll up into Capacity Grid actuals for this consultant and client.
+                    Logged actuals here will roll up into Plan vs Actuals for this consultant and client.
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-[160px_120px_minmax(0,1fr)_160px_auto]">
@@ -801,11 +943,22 @@ export function EditableTaskBoard({
                     <label className="block space-y-1">
                         <span className="text-[11px] uppercase tracking-wider text-text-muted">Hours</span>
                         <input
-                            type="number"
-                            min="0"
-                            step="0.25"
+                            type="text"
+                            inputMode="decimal"
                             value={billableEntryDraft.hours}
-                            onChange={(event) => setBillableEntryDraft((prev) => ({ ...prev, hours: Number(event.target.value || 0) }))}
+                            onFocus={selectInputValueOnFocus}
+                            onChange={(event) => setBillableEntryDraft((prev) => ({
+                                ...prev,
+                                hours: sanitizeDecimalDraft(event.target.value),
+                            }))}
+                            onBlur={() => {
+                                setBillableEntryDraft((prev) => ({
+                                    ...prev,
+                                    hours: prev.hours.trim().length > 0
+                                        ? formatEditableNumber(normalizeEstimateHours(prev.hours))
+                                        : "",
+                                }));
+                            }}
                             className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                         />
                     </label>
@@ -815,7 +968,7 @@ export function EditableTaskBoard({
                             type="text"
                             value={billableEntryDraft.note}
                             onChange={(event) => setBillableEntryDraft((prev) => ({ ...prev, note: event.target.value }))}
-                            placeholder="Optional billing note"
+                            placeholder="Optional actuals note"
                             className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                         />
                     </label>
@@ -845,13 +998,13 @@ export function EditableTaskBoard({
                 <div className="rounded-xl border border-border/50 bg-background/30">
                     <div className="flex items-center justify-between border-b border-border/40 px-4 py-3">
                         <div>
-                            <div className="text-sm font-semibold text-white">Billable History</div>
+                            <div className="text-sm font-semibold text-white">Actuals History</div>
                             <div className="text-xs text-text-muted">{totalHours.toFixed(2)}h logged for this week</div>
                         </div>
                     </div>
                     <div className="divide-y divide-border/30">
                         {entries.length === 0 && (
-                            <div className="px-4 py-8 text-sm text-text-muted">No billable entries logged yet for this task.</div>
+                            <div className="px-4 py-8 text-sm text-text-muted">No actuals entries logged yet for this task.</div>
                         )}
                         {entries.map((entry) => (
                             <div key={entry.id} className="flex items-start justify-between gap-3 px-4 py-3">
@@ -985,6 +1138,28 @@ export function EditableTaskBoard({
                             ))}
                         </select>
                     </label>
+                    <label className="flex items-center gap-2 text-xs text-text-muted">
+                        <span>Task Finder</span>
+                        <div className="flex items-center rounded-md border border-border bg-surface/30 px-2 py-1.5">
+                            <input
+                                type="text"
+                                value={taskFinderQuery}
+                                onChange={(event) => setTaskFinderQuery(event.target.value)}
+                                placeholder="Find task by name..."
+                                className="w-[220px] bg-transparent text-xs text-white outline-none placeholder:text-text-muted"
+                            />
+                            {taskFinderQuery.trim().length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => setTaskFinderQuery("")}
+                                    className="inline-flex items-center justify-center rounded-sm p-1 text-text-muted hover:bg-surface-hover hover:text-white"
+                                    aria-label="Clear task finder"
+                                >
+                                    <X className="w-3.5 h-3.5" />
+                                </button>
+                            )}
+                        </div>
+                    </label>
                     <button
                         type="button"
                         onClick={handleCreateTask}
@@ -1007,141 +1182,91 @@ export function EditableTaskBoard({
                 Original ClickUp tasks for this scope/week are used as editable placeholders here.
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-4 min-h-[640px]">
-                <div className="border border-border/50 bg-surface/20 rounded-xl p-4 overflow-hidden">
-                    <div className="flex gap-4 overflow-x-auto pb-2 h-full">
-                        {STATUS_COLUMNS.map((column) => {
-                            const columnTasks = groupedTasks[column.id];
-                            return (
-                                <div
-                                    key={column.id}
-                                    className="flex-shrink-0 w-[320px] rounded-xl border border-border/40 bg-background/40 p-3 flex flex-col"
-                                    onDragOver={(event) => event.preventDefault()}
-                                    onDrop={() => handleDropToStatus(column.id)}
-                                >
-                                    <div className="flex items-center justify-between px-1 pb-3 border-b border-border/30">
-                                        <h3 className="text-sm font-semibold text-white">{column.label}</h3>
-                                        <span className="text-xs bg-surface-hover text-text-muted px-1.5 py-0.5 rounded-full font-mono">
-                                            {columnTasks.length}
-                                        </span>
-                                    </div>
-                                    <div className="pt-3 space-y-2 overflow-y-auto custom-scrollbar min-h-[540px]">
-                                        {columnTasks.map((task) => (
-                                            <div
-                                                key={task.id}
-                                                draggable
-                                                onDragStart={() => setDragTaskId(task.id)}
-                                                onClick={() => setSelectedTaskId(task.id)}
-                                                onDoubleClick={() => {
-                                                    setSelectedTaskId(task.id);
-                                                    setIsCenteredEditorOpen(true);
-                                                }}
-                                                className={cn(
-                                                    "rounded-lg border border-border/40 bg-surface/30 p-3 cursor-pointer hover:bg-surface-hover/50 transition-colors",
-                                                    selectedTaskId === task.id && "border-primary/50 bg-primary/10"
-                                                )}
-                                            >
-                                                <div className="flex items-start justify-between gap-2">
-                                                    <div className="min-w-0">
-                                                        <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.16em] text-text-muted">
-                                                            {getTaskClientDisplayLabel(task, scopeType, scopeName, taskClientLabelBySourceTaskId)}
-                                                        </div>
-                                                        <div className="text-sm font-semibold text-white truncate">{task.subject}</div>
-                                                        {task.description && (
-                                                            <div className="mt-1 text-xs text-text-muted line-clamp-3">{task.description}</div>
-                                                        )}
-                                                        {task.sourceTaskId && (
-                                                            <div className="mt-2">
-                                                                <span className="inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
-                                                                    ClickUp Placeholder
-                                                                </span>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    <GripVertical className="w-4 h-4 text-text-muted shrink-0" />
-                                                </div>
-                                                <label
-                                                    className="mt-3 inline-flex items-center gap-2 text-xs text-text-muted"
-                                                    onClick={(event) => event.stopPropagation()}
-                                                >
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={Boolean(task.isAi)}
-                                                        onChange={(event) => handleToggleTaskAi(task, event.target.checked)}
-                                                        className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                                    />
-                                                    <span>AI</span>
-                                                </label>
-                                                <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-text-muted">
-                                                    <span className="truncate">{task.assignee || "Unassigned"}</span>
-                                                    <div className="flex items-center gap-3">
-                                                        <span>{getTaskWeeklyBillableHours(task).toFixed(2)}h logged</span>
-                                                        <span>{format(new Date(`${task.week}T00:00:00`), "'Wk Of' MMM d")}</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                        {columnTasks.length === 0 && (
-                                            <div className="rounded-lg border border-dashed border-border/40 py-10 text-center text-xs text-text-muted">
-                                                Drop tasks here
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-
-                <div className="border border-border/50 bg-surface/20 rounded-xl overflow-hidden">
-                    <div className="px-4 py-3 border-b border-border/50 bg-surface/30 flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-text-main">Task Editor</h3>
-                        {editorState && (
-                            <button
-                                type="button"
-                                onClick={() => handleDeleteTask(editorState.id)}
-                                className="inline-flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
+            <div className="border border-border/50 bg-surface/20 rounded-xl p-4 overflow-hidden min-h-[640px]">
+                <div className="flex gap-4 overflow-x-auto pb-2 h-full">
+                    {STATUS_COLUMNS.map((column) => {
+                        const columnTasks = groupedTasks[column.id];
+                        return (
+                            <div
+                                key={column.id}
+                                className="flex-shrink-0 w-[320px] rounded-xl border border-border/40 bg-background/40 p-3 flex flex-col"
+                                onDragOver={(event) => event.preventDefault()}
+                                onDrop={() => handleDropToStatus(column.id)}
                             >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete
-                            </button>
-                        )}
-                    </div>
-                    <div className="p-4 space-y-4">
-                        {!editorState && (
-                            <div className="rounded-lg border border-dashed border-border/40 py-16 text-center text-sm text-text-muted">
-                                Select a task to edit it.
-                            </div>
-                        )}
-
-                        {editorState && (
-                            <>
-                                <div className="inline-flex rounded-lg border border-border/50 bg-background/40 p-1">
-                                    <button
-                                        type="button"
-                                        onClick={() => setEditorTab("details")}
-                                        className={cn(
-                                            "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                                            editorTab === "details" ? "bg-primary/15 text-white" : "text-text-muted hover:text-white"
-                                        )}
-                                    >
-                                        Details
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setEditorTab("billable")}
-                                        className={cn(
-                                            "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                                            editorTab === "billable" ? "bg-primary/15 text-white" : "text-text-muted hover:text-white"
-                                        )}
-                                    >
-                                        Billable Log
-                                    </button>
+                                <div className="flex items-center justify-between px-1 pb-3 border-b border-border/30">
+                                    <h3 className="text-sm font-semibold text-white">{column.label}</h3>
+                                    <span className="text-xs bg-surface-hover text-text-muted px-1.5 py-0.5 rounded-full font-mono">
+                                        {columnTasks.length}
+                                    </span>
                                 </div>
-                                {editorTab === "details" ? renderTaskEditorFields() : renderBillableHistoryTab()}
-                            </>
-                        )}
-                    </div>
+                                <div className="pt-3 space-y-2 overflow-y-auto custom-scrollbar min-h-[540px]">
+                                    {columnTasks.map((task) => (
+                                        <div
+                                            key={task.id}
+                                            draggable
+                                            onDragStart={() => setDragTaskId(task.id)}
+                                            onClick={() => {
+                                                setSelectedTaskId(task.id);
+                                                setIsCenteredEditorOpen(true);
+                                            }}
+                                            onDoubleClick={() => {
+                                                setSelectedTaskId(task.id);
+                                                setIsCenteredEditorOpen(true);
+                                            }}
+                                            className={cn(
+                                                "rounded-lg border border-border/40 bg-surface/30 p-3 cursor-pointer hover:bg-surface-hover/50 transition-colors",
+                                                selectedTaskId === task.id && "border-primary/50 bg-primary/10"
+                                            )}
+                                        >
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.16em] text-text-muted">
+                                                        {getTaskClientDisplayLabel(task, scopeType, scopeName, taskClientLabelBySourceTaskId)}
+                                                    </div>
+                                                    <div className="text-sm font-semibold text-white truncate">{task.subject}</div>
+                                                    {task.description && (
+                                                        <div className="mt-1 text-xs text-text-muted line-clamp-3">{task.description}</div>
+                                                    )}
+                                                    {task.sourceTaskId && (
+                                                        <div className="mt-2">
+                                                            <span className="inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+                                                                ClickUp Placeholder
+                                                            </span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <GripVertical className="w-4 h-4 text-text-muted shrink-0" />
+                                            </div>
+                                            <label
+                                                className="mt-3 inline-flex items-center gap-2 text-xs text-text-muted"
+                                                onClick={(event) => event.stopPropagation()}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={Boolean(task.isAi)}
+                                                    onChange={(event) => handleToggleTaskAi(task, event.target.checked)}
+                                                    className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                                />
+                                                <span>AI</span>
+                                            </label>
+                                            <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-text-muted">
+                                                <span className="truncate">{task.assignee || "Unassigned"}</span>
+                                                <div className="flex items-center gap-3">
+                                                    <span>{getTaskWeeklyBillableHours(task).toFixed(2)}h logged</span>
+                                                    <span>{format(new Date(`${task.week}T00:00:00`), "'Wk Of' MMM d")}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {columnTasks.length === 0 && (
+                                        <div className="rounded-lg border border-dashed border-border/40 py-10 text-center text-xs text-text-muted">
+                                            Drop tasks here
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
             {isCenteredEditorOpen && editorState && (
@@ -1175,18 +1300,20 @@ export function EditableTaskBoard({
                                 >
                                     Details
                                 </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setEditorTab("billable")}
-                                    className={cn(
-                                        "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                                        editorTab === "billable" ? "bg-primary/15 text-white" : "text-text-muted hover:text-white"
-                                    )}
-                                >
-                                    Billable Log
-                                </button>
+                                {!editorState.isDraft && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setEditorTab("billable")}
+                                        className={cn(
+                                            "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                                            editorTab === "billable" ? "bg-primary/15 text-white" : "text-text-muted hover:text-white"
+                                        )}
+                                    >
+                                        Actuals Log
+                                    </button>
+                                )}
                             </div>
-                            {editorTab === "details" ? renderTaskEditorFields() : renderBillableHistoryTab()}
+                            {editorTab === "details" || editorState.isDraft ? renderTaskEditorFields() : renderBillableHistoryTab()}
                         </div>
                     </div>
                 </div>
@@ -1201,7 +1328,7 @@ export function EditableTaskBoard({
                             </div>
                         </div>
                         <div className="px-5 py-4 text-sm text-text-muted">
-                            Any editable tasks and billable history saved inside this board will also be removed from Mission Control.
+                            Any editable tasks and actuals history saved inside this board will also be removed from Mission Control.
                         </div>
                         <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
                             <button

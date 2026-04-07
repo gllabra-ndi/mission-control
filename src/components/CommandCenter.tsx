@@ -22,10 +22,12 @@ interface ClientPaceTrackerRow {
     client: string;
     sa: string;
     dealType: string;
+    monthlyMin: number;
     wkMax: number;
     plannedHours: number;
     billedHours: number;
     monthlyMax: number;
+    isUnderMonthlyMin: boolean;
     isPlannedOverMonthlyMax: boolean;
     isOverMonthlyMax: boolean;
     statusLabel: string;
@@ -375,10 +377,6 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
     const monthPacingStatusClass = monthToDateBilledHrs >= monthPacingTarget ? "text-emerald-400" : "text-amber-300";
     const monthProgressLabel = `${Math.round(activeMonthProgress * 100)}% THROUGH MONTH`;
 
-    const previousWeekStr = format(subWeeks(activeWeekDate, 1), "yyyy-MM-dd");
-    const previousWeekDate = subWeeks(activeWeekDate, 1);
-    const previousWeekPeriodLabel = `${format(previousWeekDate, "MM/dd")} to ${format(addDays(previousWeekDate, 4), "MM/dd")}`;
-
     const taskScopeLabelsByType = useMemo(() => {
         const listLabels = new Map<string, string>();
         const folderLabels = new Map<string, string>();
@@ -510,15 +508,6 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
         [buildCapacityHeaderMetrics, consultantConfigs, dbConfig]
     );
 
-    const previousCapacityMetrics = useMemo(
-        () => buildCapacityHeaderMetrics(
-            capacityGridWeeksByWeek.get(previousWeekStr),
-            previousConsultantConfigs,
-            Array.isArray(dbConfig?.previousTaskBillableRollups) ? dbConfig.previousTaskBillableRollups : []
-        ),
-        [buildCapacityHeaderMetrics, capacityGridWeeksByWeek, dbConfig, previousConsultantConfigs, previousWeekStr]
-    );
-
     const buildWeekAtGlanceCards = (metrics: CapacityHeaderMetrics) => ([
         { label: "Consultant Total Capacity", value: metrics.totalCapacity, accent: "text-white" },
         { label: "Planned", value: metrics.planned, accent: "text-white" },
@@ -533,58 +522,67 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
         },
     ]);
 
-    const previousWeekCards = buildWeekAtGlanceCards(previousCapacityMetrics);
     const currentWeekCards = buildWeekAtGlanceCards(currentCapacityMetrics);
 
     return (
         <div className="flex flex-col space-y-8 pb-32 px-1">
             {/* Header */}
-            <div className="flex items-center justify-between shrink-0">
-                    <div className="flex items-center gap-4">
-                        <h2 className="text-sm font-medium text-text-main flex items-center gap-2">
-                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
-                            Command Center
-                        </h2>
+            <div className="flex flex-col gap-5 shrink-0">
+                    <div className="space-y-4">
+                        <div className="flex items-center gap-4">
+                            <h2 className="text-sm font-medium text-text-main flex items-center gap-2">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
+                                Command Center
+                            </h2>
 
-                        <div className="flex items-center bg-surface border border-border rounded overflow-hidden">
-                            <button disabled={isNavigationBlocked} onClick={handlePrevWeek} className="px-2 py-1 hover:bg-surface-hover text-text-muted transition-colors disabled:opacity-50">
-                                <ChevronLeft className="w-4 h-4" />
-                            </button>
-                            <button disabled={isWeekLoading} onClick={handleCurrentWeek} className="px-3 py-1 text-xs font-medium text-white hover:bg-surface-hover transition-colors border-l border-r border-border disabled:opacity-50">
-                                {isCurrentWeek ? "Current Week" : format(activeWeekDate, "MMM d, yyyy")}
-                            </button>
-                            <button disabled={isNavigationBlocked} onClick={handleNextWeek} className="px-2 py-1 hover:bg-surface-hover text-text-muted transition-colors disabled:opacity-50">
-                                <ChevronRight className="w-4 h-4" />
-                            </button>
+                            <div className="flex items-center bg-surface border border-border rounded overflow-hidden">
+                                <button disabled={isNavigationBlocked} onClick={handlePrevWeek} className="px-2 py-1 hover:bg-surface-hover text-text-muted transition-colors disabled:opacity-50">
+                                    <ChevronLeft className="w-4 h-4" />
+                                </button>
+                                <button disabled={isWeekLoading} onClick={handleCurrentWeek} className="px-3 py-1 text-xs font-medium text-white hover:bg-surface-hover transition-colors border-l border-r border-border disabled:opacity-50">
+                                    {isCurrentWeek ? "Current Week" : format(activeWeekDate, "MMM d, yyyy")}
+                                </button>
+                                <button disabled={isNavigationBlocked} onClick={handleNextWeek} className="px-2 py-1 hover:bg-surface-hover text-text-muted transition-colors disabled:opacity-50">
+                                    <ChevronRight className="w-4 h-4" />
+                                </button>
+                            </div>
+
+                            {isPastWeek && (
+                                <span className="text-xs font-medium text-amber-500 bg-amber-500/10 px-2 py-1 rounded">
+                                    Read-Only History
+                                </span>
+                            )}
                         </div>
 
-                        {isPastWeek && (
-                            <span className="text-xs font-medium text-amber-500 bg-amber-500/10 px-2 py-1 rounded">
-                                Read-Only History
-                            </span>
-                        )}
+                        <div className="text-xs text-text-muted bg-surface-hover px-3 py-1.5 rounded border border-border inline-flex">
+                            Auto-synced with ClickUp Time Entries
+                        </div>
                     </div>
 
-                    <div className="text-xs text-text-muted bg-surface-hover px-3 py-1.5 rounded border border-border">
-                        Auto-synced with ClickUp Time Entries
+                    <div className="w-full overflow-hidden rounded-2xl border border-border/60 bg-[linear-gradient(180deg,rgba(39,32,74,0.92)_0%,rgba(27,24,49,0.96)_100%)] shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
+                        <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
+                            <h3 className="text-lg font-semibold text-white">MONTH AT A GLANCE</h3>
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200/80">{activeMonthLabel}</div>
+                        </div>
+                        <div className="grid grid-cols-1 divide-y divide-white/10 md:grid-cols-[1fr_1fr_0.9fr] md:divide-x md:divide-y-0">
+                            <div className="px-6 py-6">
+                                <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Month To Date Actuals</div>
+                                <div className="mt-4 text-4xl font-bold leading-none text-white">{monthToDateBilledHrs.toFixed(1)}</div>
+                            </div>
+                            <div className="px-6 py-6">
+                                <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Monthly Base Target</div>
+                                <div className="mt-4 text-4xl font-bold leading-none text-white">{monthlyBaseTarget.toFixed(0)}</div>
+                            </div>
+                            <div className="bg-white/[0.02] px-6 py-6">
+                                <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Month Pacing Status</div>
+                                <div className={cn("mt-4 text-4xl font-bold leading-none", monthPacingStatusClass)}>{monthPacingStatus}</div>
+                                <div className="mt-2 text-[11px] uppercase tracking-[0.18em] text-indigo-200/70">{monthProgressLabel}</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
             <div className="space-y-4">
-                <div className="border border-border/50 bg-surface/20 rounded-xl overflow-hidden shrink-0">
-                        <div className="px-5 py-3 border-b border-border/50 bg-surface/30">
-                            <h3 className="text-sm font-semibold text-text-main">LAST WEEK AT A GLANCE — {previousWeekPeriodLabel}</h3>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 divide-y md:divide-y-0 md:divide-x divide-border/40">
-                            {previousWeekCards.map((card) => (
-                                <div key={card.label} className={cn("p-4", card.lane)}>
-                                    <div className="text-[11px] uppercase text-text-muted">{card.label}</div>
-                                    <div className={cn("mt-1 text-3xl font-bold", card.accent)}>{card.value.toFixed(1)}</div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-
                 <div className="border border-border/50 bg-surface/20 rounded-xl overflow-hidden shrink-0">
                         <div className="px-5 py-3 border-b border-border/50 bg-surface/30">
                             <h3 className="text-sm font-semibold text-text-main">THIS WEEK AT A GLANCE</h3>
@@ -599,26 +597,6 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                         </div>
                 </div>
 
-                <div className="overflow-hidden rounded-2xl border border-border/60 bg-[linear-gradient(180deg,rgba(39,32,74,0.92)_0%,rgba(27,24,49,0.96)_100%)] shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
-                    <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
-                        <h3 className="text-lg font-semibold text-white">MONTH AT A GLANCE — {activeMonthLabel}</h3>
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200/80">{monthProgressLabel}</div>
-                    </div>
-                    <div className="grid grid-cols-1 divide-y divide-white/10 md:grid-cols-[1fr_1fr_0.9fr] md:divide-x md:divide-y-0">
-                        <div className="px-6 py-8">
-                            <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Month To Date Billed</div>
-                            <div className="mt-4 text-5xl font-bold leading-none text-white">{monthToDateBilledHrs.toFixed(1)}</div>
-                        </div>
-                        <div className="px-6 py-8">
-                            <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Monthly Base Target</div>
-                            <div className="mt-4 text-5xl font-bold leading-none text-white">{monthlyBaseTarget.toFixed(0)}</div>
-                        </div>
-                        <div className="bg-white/[0.02] px-6 py-8">
-                            <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-indigo-200/70">Month Pacing Status</div>
-                            <div className={cn("mt-4 text-5xl font-bold leading-none", monthPacingStatusClass)}>{monthPacingStatus}</div>
-                        </div>
-                    </div>
-                </div>
             </div>
 
             {/* Client Pace Tracker Grid */}
@@ -629,7 +607,7 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                         <h3 className="text-sm font-semibold text-text-main">CLIENT PACE TRACKER — {activeMonthLabel}</h3>
                     </div>
                     <div className="text-xs text-text-muted">
-                        Monthly planned vs monthly billed. Client turns red when billed hours exceed the month max.
+                        Monthly planned vs monthly actuals. Client turns red when planned is below min or above max, or when actuals exceed max.
                     </div>
                 </div>
                 <div className="overflow-x-auto text-[13px]">
@@ -643,6 +621,7 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                             team: number;
                             sa: string;
                             dealType: string;
+                            monthlyMin: number;
                             wkMax: number;
                             monthlyMax: number;
                             plannedHours: number;
@@ -675,6 +654,7 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                     team: Number(clientDirectory?.team ?? row?.team ?? clientConfigs[rowId]?.team ?? 0),
                                     sa: String(clientDirectory?.sa ?? row?.teamSa ?? ""),
                                     dealType: String(clientDirectory?.dealType ?? row?.dealType ?? ""),
+                                    monthlyMin: 0,
                                     wkMax: Number(clientDirectory?.max ?? row?.wkMax ?? 0),
                                     monthlyMax: 0,
                                     plannedHours: 0,
@@ -689,6 +669,7 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                 existing.team = Number(existing.team || clientDirectory?.team || row?.team || clientConfigs[rowId]?.team || 0);
                                 existing.sa = existing.sa || String(clientDirectory?.sa ?? row?.teamSa ?? "");
                                 existing.dealType = existing.dealType || String(clientDirectory?.dealType ?? row?.dealType ?? "");
+                                existing.monthlyMin += Number(clientDirectory?.min ?? row?.wkMin ?? 0);
                                 existing.wkMax = Number(existing.wkMax || clientDirectory?.max || row?.wkMax || 0);
                                 existing.monthlyMax += Number(clientDirectory?.max ?? row?.wkMax ?? 0);
                                 existing.plannedHours += Number(rowPlannedHours ?? 0);
@@ -708,19 +689,20 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                 ?? billedByClient.get(nameKey)
                                 ?? 0
                             );
+                            const monthlyMin = Number(monthlyCapacity?.monthlyMin ?? 0);
                             const wkMax = Number(clientDirectory?.max ?? row?.wkMax ?? monthlyCapacity?.wkMax ?? 0);
                             const monthlyMax = Number(monthlyCapacity?.monthlyMax ?? 0);
                             const plannedHours = Number(monthlyCapacity?.plannedHours ?? 0);
+                            const isUnderMonthlyMin = monthlyMin > 0 && plannedHours < monthlyMin;
                             const isPlannedOverMonthlyMax = monthlyMax > 0 && plannedHours > monthlyMax;
                             const isOverMonthlyMax = monthlyMax > 0 && billedHours > monthlyMax;
-                            const isUnderWeeklyMax = wkMax > 0 && plannedHours <= wkMax;
                             const statusLabel = isOverMonthlyMax
-                                ? "Billed Over Max"
+                                ? "Actuals Over Max"
+                                : isUnderMonthlyMin
+                                    ? "Under Minimum"
                                 : isPlannedOverMonthlyMax
                                     ? "Planned Over Max"
-                                    : isUnderWeeklyMax
-                                        ? "Under Wk Max"
-                                        : "OK";
+                                    : "OK";
                             const teamFromConfig = clientConfigs[rowId]?.team;
 
                             return {
@@ -729,10 +711,12 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                 client: String(clientDirectory?.name ?? row?.client ?? monthlyCapacity?.client ?? "Client"),
                                 sa: String(clientDirectory?.sa ?? row?.teamSa ?? monthlyCapacity?.sa ?? ""),
                                 dealType: String(clientDirectory?.dealType ?? row?.dealType ?? monthlyCapacity?.dealType ?? ""),
+                                monthlyMin,
                                 wkMax,
                                 plannedHours,
                                 billedHours,
                                 monthlyMax,
+                                isUnderMonthlyMin,
                                 isPlannedOverMonthlyMax,
                                 isOverMonthlyMax,
                                 statusLabel,
@@ -761,7 +745,7 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                         <th className="px-5 py-2.5 font-medium w-24 text-right border-r border-dashed border-blue-400/30">Wk Max</th>
                                         <th className="px-5 py-2.5 font-medium w-28 text-right border-r border-dashed border-blue-400/30">Month Max</th>
                                         <th className="px-5 py-2.5 font-medium w-28 font-bold text-white text-right border-r border-dashed border-blue-400/30 bg-indigo-500/10">Planned (Month)</th>
-                                        <th className="px-5 py-2.5 font-medium w-28 font-bold text-white text-right border-r border-dashed border-blue-400/30 bg-cyan-500/10">Billed (Month)</th>
+                                        <th className="px-5 py-2.5 font-medium w-28 font-bold text-white text-right border-r border-dashed border-blue-400/30 bg-cyan-500/10">Actuals (Month)</th>
                                         <th className="px-5 py-2.5 font-medium w-24 text-center">Status</th>
                                     </tr>
                                 </thead>
@@ -776,8 +760,10 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                                     "px-5 py-2 font-medium border-r border-dashed border-blue-400/30",
                                                     row.isOverMonthlyMax
                                                         ? "text-red-400"
+                                                        : row.isUnderMonthlyMin
+                                                        ? "text-red-400"
                                                         : row.isPlannedOverMonthlyMax
-                                                        ? "text-amber-300"
+                                                        ? "text-red-400"
                                                         : "text-text-main"
                                                 )}>
                                                     <span className="text-xs font-medium">{row.client}</span>
@@ -804,8 +790,10 @@ export function CommandCenter({ tasks, timeEntries, activeWeekStr, dbConfig, onN
                                                     "px-5 py-2 text-center text-xs font-semibold",
                                                     row.isOverMonthlyMax
                                                         ? "text-red-400"
+                                                        : row.isUnderMonthlyMin
+                                                        ? "text-red-400"
                                                         : row.isPlannedOverMonthlyMax
-                                                        ? "text-amber-300"
+                                                        ? "text-red-400"
                                                         : "text-emerald-400"
                                                 )}>
                                                     {row.statusLabel}

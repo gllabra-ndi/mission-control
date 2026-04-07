@@ -62,11 +62,11 @@ interface SidebarProps {
 
 const navItems = [
     { icon: BarChart2, label: "Command Center", id: "command-center" },
-    { icon: TrendingUp, label: "Billing Trends", id: "trends" },
+    { icon: TrendingUp, label: "Actuals Trends", id: "trends" },
     { icon: Activity, label: "Capacity Trends", id: "capacity-trends" },
     { icon: Users, label: "Consultant Utilization", id: "consultant-utilization" },
     { icon: Users, label: "Timesheets", id: "timesheets" },
-    { icon: Grid2x2, label: "Capacity Grid", id: "capacity-grid" },
+    { icon: Grid2x2, label: "Plan vs Actuals", id: "capacity-grid" },
     { icon: Building2, label: "Client Setup", id: "client-setup" },
 ];
 

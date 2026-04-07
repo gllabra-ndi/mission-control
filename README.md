@@ -21,6 +21,8 @@ npm run dev
 
 The app will start on [http://localhost:3000](http://localhost:3000).
 
+The canonical local SQLite database path is [prisma/dev.db](/Users/scottlee/Antigravity/MissionControl/prisma/dev.db).
+
 ## Testing
 
 Run the core checks:
@@ -46,7 +48,7 @@ npm run test:full
 Notes:
 
 - `test:smoke` launches the app on `http://127.0.0.1:3100`
-- it clones `dev.db` into a temporary SQLite file so the suite does not mutate your main local database
+- it clones `prisma/dev.db` into a temporary SQLite file so the suite does not mutate your main local database
 - it runs `prisma db push` against that temporary database so the smoke environment matches the current schema
 - it uses an isolated `.next-smoke-*` build directory so smoke runs do not corrupt your normal `.next` cache
 
@@ -65,8 +67,11 @@ Optional NetSuite integration variables:
 - `NETSUITE_TOKEN_SECRET`
 - `NETSUITE_REALM`
 - `NETSUITE_BASE_URL`
-- `NETSUITE_HEALTH_PATH`
-- `NETSUITE_CONSULTANT_PATH`
+- `NETSUITE_RESTLET_PATH`
+- `NETSUITE_DISCOVERY_SCRIPT_ID`
+- `NETSUITE_DISCOVERY_DEPLOY_ID`
+- `NETSUITE_TIME_ENTRY_SCRIPT_ID`
+- `NETSUITE_TIME_ENTRY_DEPLOY_ID`
 - `NETSUITE_SYNC_TOKEN`
 
 Authentication variables for office rollout:
@@ -90,7 +95,7 @@ GET /api/health
 
 The endpoint verifies that the app can reach the database.
 
-## NetSuite Consultant Sync
+## NetSuite RESTlet Integration
 
 Once NetSuite credentials are configured, you can inspect readiness with:
 
@@ -98,7 +103,44 @@ Once NetSuite credentials are configured, you can inspect readiness with:
 GET /api/integrations/netsuite/consultants/sync
 ```
 
-Run a dry run:
+The shared health check verifies both the Discovery and Time Entry RESTlets:
+
+```bash
+GET /api/integrations/netsuite/health
+```
+
+Discovery routes mirror the documented RESTlet query parameters:
+
+```bash
+GET /api/integrations/netsuite/discovery?action=listEmployees&limit=1000
+GET /api/integrations/netsuite/discovery?action=listProjects&limit=1000
+GET /api/integrations/netsuite/discovery?action=listServiceItems&limit=1000
+GET /api/integrations/netsuite/discovery?action=getEmployee&email=jsmith@example.com
+GET /api/integrations/netsuite/discovery?action=getProject&projectId=165454
+```
+
+Time entry routes mirror the Time Entry RESTlet:
+
+```bash
+GET /api/integrations/netsuite/time-entries?action=getTimeEntry&externalId=mc-agent-abc123
+GET /api/integrations/netsuite/time-entries?action=searchTimeEntries&employeeId=1234&dateFrom=2026-03-01&dateTo=2026-03-31
+POST /api/integrations/netsuite/time-entries
+{
+  "action": "createTimeEntry",
+  "data": {
+    "externalId": "mc-agent-f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "employeeEmail": "jsmith@example.com",
+    "customer": 165454,
+    "hours": 2,
+    "date": "2026-03-30",
+    "memo": "Built Mission Control RESTlet integration",
+    "isBillable": true,
+    "item": 17
+  }
+}
+```
+
+Consultant roster sync uses the Discovery RESTlet's `listEmployees` action under the hood. Run a dry run:
 
 ```bash
 POST /api/integrations/netsuite/consultants/sync
@@ -117,6 +159,12 @@ If `NETSUITE_SYNC_TOKEN` is set, send it as either:
 
 - `Authorization: Bearer <token>`
 - `x-sync-token: <token>`
+
+Note:
+
+- the default NetSuite base URL now targets the RESTlet domain: `https://<account>.restlets.api.netsuite.com`
+- the documented script/deploy defaults are Discovery `2757/1` and Time Entry `2758/1`
+- the NetSuite deployments are noted as `TESTING` in the supplied docs and must be switched to `RELEASED` before production traffic
 
 ## Production Recommendation
 

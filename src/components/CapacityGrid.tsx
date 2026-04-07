@@ -10,6 +10,7 @@ import {
     CapacityGridRow,
     ClientDirectoryRecord,
     EditableTaskBillableRollupRecord,
+    EditableTaskPlannedRollupRecord,
     copyCapacityGridFromPriorWeek,
     updateCapacityGridConfig
 } from "@/app/actions";
@@ -28,6 +29,7 @@ interface CapacityGridProps {
     tasks?: ClickUpTask[];
     folders?: FolderWithLists[];
     activeAssigneeFilter?: string | null;
+    plannedRollups?: EditableTaskPlannedRollupRecord[];
     billableRollups?: EditableTaskBillableRollupRecord[];
     onNavigateWeek?: (nextWeek: string) => void;
     onSelectTab?: (tab: string) => void;
@@ -70,6 +72,18 @@ function clientIdFromName(value: string) {
 
 function clampNonNegative(value: number) {
     return Math.max(0, value);
+}
+
+function sanitizeDecimalDraft(value: string) {
+    const sanitized = String(value || "").replace(/[^0-9.]/g, "");
+    const firstDotIndex = sanitized.indexOf(".");
+    if (firstDotIndex === -1) return sanitized;
+    return `${sanitized.slice(0, firstDotIndex + 1)}${sanitized.slice(firstDotIndex + 1).replace(/\./g, "")}`;
+}
+
+function formatEditableNumber(value: number | string | null | undefined) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(numeric) : "";
 }
 
 function selectInputValueOnFocus(event: FocusEvent<HTMLInputElement>) {
@@ -131,6 +145,7 @@ export function CapacityGrid({
     tasks = [],
     folders = [],
     activeAssigneeFilter = null,
+    plannedRollups = [],
     billableRollups = [],
     onNavigateWeek,
     onSelectTab,
@@ -149,6 +164,7 @@ export function CapacityGrid({
     const [noteEditor, setNoteEditor] = useState<AllocationNoteEditorState | null>(null);
     const [removeClientConfirm, setRemoveClientConfirm] = useState<RemoveClientConfirmState | null>(null);
     const [gridMode, setGridMode] = useState<"plan" | "view">("plan");
+    const [allocationInputDrafts, setAllocationInputDrafts] = useState<Record<string, string>>({});
     const initializedWeekRef = useRef<string>("");
     const autoFillRunKeyRef = useRef<string>("");
     const navUnlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -161,6 +177,7 @@ export function CapacityGrid({
         initializedWeekRef.current = activeWeekStr;
         setResources(initialGrid?.resources ?? []);
         setRows(sanitizeCapacityRows(initialGrid?.rows ?? []));
+        setAllocationInputDrafts({});
     }, [activeWeekStr, initialGrid?.resources, initialGrid?.rows]);
 
     useEffect(() => {
@@ -453,14 +470,16 @@ export function CapacityGrid({
         });
     };
 
-    const updateAllocation = (
-        rowId: string,
-        resourceId: string,
-        value: number
-    ) => {
-        const nextValue = clampNonNegative(value);
-        setRows((prev) => {
-            const nextRows = prev.map((row) => {
+    const getAllocationDraftKey = useCallback((rowId: string, resourceId: string) => `${rowId}:${resourceId}`, []);
+
+    const commitAllocationInput = useCallback((rowId: string, resourceId: string) => {
+        const draftKey = getAllocationDraftKey(rowId, resourceId);
+        const currentRow = rows.find((row) => row.id === rowId);
+        const currentHours = Number(currentRow?.allocations?.[resourceId]?.hours ?? 0);
+        const rawDraft = allocationInputDrafts[draftKey];
+        const nextValue = clampNonNegative(toNumber(rawDraft ?? formatEditableNumber(currentHours)));
+        if (nextValue !== currentHours) {
+            const nextRows = rows.map((row) => {
                 if (row.id !== rowId) return row;
                 const nextAllocations: Record<string, CapacityGridAllocation> = {
                     ...row.allocations,
@@ -475,10 +494,16 @@ export function CapacityGrid({
                     allocations: nextAllocations,
                 };
             });
+            setRows(nextRows);
             onGridChange?.({ resources, rows: nextRows });
-            return nextRows;
+            persist(nextRows);
+        }
+        setAllocationInputDrafts((prev) => {
+            const next = { ...prev };
+            delete next[draftKey];
+            return next;
         });
-    };
+    }, [allocationInputDrafts, getAllocationDraftKey, onGridChange, persist, resources, rows]);
 
     const updateAllocationNote = (
         rowId: string,
@@ -757,6 +782,46 @@ export function CapacityGrid({
         }, 0);
     }, [billableRollups, getScopeLabels]);
 
+    const getTaskEstimateForCell = useCallback((row: CapacityGridRow, resource: CapacityGridResource) => {
+        const rowClientKey = normalizeName(String(row.client || ""));
+        const rowIdKey = normalizeName(String(row.id || ""));
+        if (!rowClientKey && !rowIdKey) return 0;
+
+        const resourceFullKey = normalizeName(String(resource.name || ""));
+        const resourceFirstKey = normalizeName(String(resource.name || "").split(/\s+/)[0] || "");
+        if (!resourceFullKey && !resourceFirstKey) return 0;
+
+        return plannedRollups.reduce((sum, rollup) => {
+            const assigneeFullKey = normalizeName(String(rollup.assignee || ""));
+            const assigneeFirstKey = normalizeName(String(rollup.assignee || "").split(/\s+/)[0] || "");
+            const consultantMatch = (
+                (resourceFullKey && assigneeFullKey === resourceFullKey)
+                || (resourceFirstKey && assigneeFullKey === resourceFirstKey)
+                || (resourceFullKey && assigneeFirstKey === resourceFullKey)
+                || (resourceFirstKey && assigneeFirstKey === resourceFirstKey)
+            );
+            if (!consultantMatch) return sum;
+
+            const scopeMatches = getScopeLabels(
+                String(rollup.scopeType || ""),
+                String(rollup.scopeId || ""),
+                rollup.sourceTaskId
+            ).some((label) => {
+                const labelKey = normalizeName(label);
+                return labelKey.length > 0 && (
+                    labelKey === rowClientKey
+                    || labelKey === rowIdKey
+                    || labelKey.includes(rowClientKey)
+                    || rowClientKey.includes(labelKey)
+                    || (rowIdKey.length > 0 && (labelKey.includes(rowIdKey) || rowIdKey.includes(labelKey)))
+                );
+            });
+
+            if (!scopeMatches) return sum;
+            return sum + Number(rollup.hours ?? 0);
+        }, 0);
+    }, [getScopeLabels, plannedRollups]);
+
     const clickupMetricsByPair = useMemo(() => {
         const exactMap = new Map<string, ClickUpCellMetrics>();
         const byConsultantListName = new Map<string, Map<string, ClickUpCellMetrics>>();
@@ -906,7 +971,10 @@ export function CapacityGrid({
             visibleResources.forEach((resource) => {
                 const clickup = getClickupMetricsForCell(row, resource);
                 const currentHours = Number(row.allocations[resource.id]?.hours ?? 0);
-                const seedHours = Number(Number(clickup.planned || 0).toFixed(1));
+                if (currentHours > 0.05) return;
+                const taskEstimateHours = Number(getTaskEstimateForCell(row, resource) || 0);
+                const seedHours = Number(Number((Number(clickup.planned || 0) + taskEstimateHours)).toFixed(1));
+                if (seedHours <= 0.05) return;
                 if (Math.abs(seedHours - currentHours) < 0.05) return;
 
                 ops.push({
@@ -921,7 +989,7 @@ export function CapacityGrid({
             .map((op) => `${op.rowId}:${op.resourceId}:${op.hours}`)
             .join("|")}`;
         return { ops, key };
-    }, [activeWeekStr, rows, visibleResources, getClickupMetricsForCell]);
+    }, [activeWeekStr, getClickupMetricsForCell, getTaskEstimateForCell, rows, visibleResources]);
 
     useEffect(() => {
         if (rows.length === 0 || visibleResources.length === 0) return;
@@ -984,7 +1052,7 @@ export function CapacityGrid({
                 <div className="flex items-center gap-4 flex-wrap">
                     <h2 className="text-sm font-medium text-text-main flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-slate-400 shadow-[0_0_10px_rgba(148,163,184,0.35)]" />
-                        Capacity Grid
+                        Plan vs Actuals
                     </h2>
                     <div className="flex items-center overflow-hidden rounded-xl border border-border/60 bg-[#0f1320]/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                         <button
@@ -1068,7 +1136,7 @@ export function CapacityGrid({
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
                 <div className={monochromeMetricCardClass}>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Consultant Total Capacity</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Consultant Actuals</div>
                     <div className="mt-2 text-3xl font-bold text-white">{totalCapacity.toFixed(1)}</div>
                 </div>
                 <div className={monochromeMetricCardClass}>
@@ -1096,7 +1164,7 @@ export function CapacityGrid({
             </div>
 
             <div ref={gridScrollRef} className="relative max-h-[calc(100vh-18rem)] overflow-auto rounded-[28px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
-                <table className="min-w-[1680px] w-full border-separate border-spacing-0 text-[12px]">
+                <table className="min-w-[1440px] w-full border-separate border-spacing-0 text-[12px]">
                     <thead>
                         <tr className="border-b-2 border-border/50 text-text-muted text-[11px] font-bold tracking-wider bg-[#111626]/90 text-[#94a3b8] cap-none">
                             <th className={cn("px-2 py-2 text-left border-r border-border/40", headerTopRowStickyClass, clientHeaderStickyClass)}>
@@ -1122,7 +1190,7 @@ export function CapacityGrid({
                                                 Planned {used.toFixed(1)}
                                             </span>
                                             <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderDetailClass(resource.id))}>
-                                                Total Capacity {maxBillable.toFixed(1)}
+                                                Actuals {maxBillable.toFixed(1)}
                                             </span>
                                         </div>
                                     </th>
@@ -1132,9 +1200,6 @@ export function CapacityGrid({
                             {gridMode === "view" && (
                                 <th className={cn("px-3 py-3 text-right border-r border-border/40", headerTopRowStickyClass)}>Actuals</th>
                             )}
-                            <th className={cn("px-3 py-3 text-right border-r border-border/40", headerTopRowStickyClass)}>Min</th>
-                            <th className={cn("px-3 py-3 text-right border-r border-border/40", headerTopRowStickyClass)}>Max</th>
-                            <th className={cn("px-3 py-3 text-left border-r border-border/40", headerTopRowStickyClass)}>Notes</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1157,8 +1222,16 @@ export function CapacityGrid({
                                             <div className={cn("mt-1 text-[10px] uppercase tracking-[0.18em]", getClientMetaLineClass(rowTotal, rowMin, rowMax))}>
                                                 Team {(clientMeta?.team ?? row.team) || "-"} · {clientMeta?.sa || row.teamSa || "No SA"} · {clientMeta?.dealType || row.dealType || "No Deal Type"}
                                             </div>
+                                            <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-text-muted">
+                                                Weekly Min {rowMin.toFixed(1)}h · Weekly Max {rowMax.toFixed(1)}h
+                                            </div>
                                             <div className={cn("mt-1 text-[10px] font-semibold uppercase tracking-[0.18em]", getClientMaxStatusClass(rowTotal, rowMin, rowMax))}>
                                                 {getClientMaxStatusLabel(rowTotal, rowMax)}
+                                            </div>
+                                            <div className={cn("mt-1 text-[10px] font-semibold uppercase tracking-[0.18em]", rowTotal >= rowMin ? "text-emerald-300" : "text-amber-300")}>
+                                                {rowTotal >= rowMin
+                                                    ? `Over Min by ${(rowTotal - rowMin).toFixed(1)}h`
+                                                    : `Under Min by ${(rowMin - rowTotal).toFixed(1)}h`}
                                             </div>
                                         </div>
                                     </td>
@@ -1184,6 +1257,9 @@ export function CapacityGrid({
                                                     ? "ring-2 ring-slate-300/45 border-slate-300/60 shadow-[0_0_0_1px_rgba(203,213,225,0.16)]"
                                                     : "";
                                                 const noteHint = allocationNote ? ` | Note: ${allocationNote}` : "";
+                                                const draftKey = getAllocationDraftKey(row.id, resource.id);
+                                                const allocationHours = row.allocations[resource.id]?.hours ?? 0;
+                                                const inputValue = allocationInputDrafts[draftKey] ?? formatEditableNumber(allocationHours);
                                                 return (
                                                     <td
                                                         data-grid-cell={`${row.id}:${resource.id}`}
@@ -1211,13 +1287,23 @@ export function CapacityGrid({
                                                                 <input
                                                                     type="text"
                                                                     inputMode="decimal"
-                                                                    value={String(row.allocations[resource.id]?.hours ?? "")}
-                                                                    onFocus={selectInputValueOnFocus}
-                                                                    onChange={(e) => {
-                                                                        const next = e.target.value.replace(/[^0-9.]/g, "");
-                                                                        updateAllocation(row.id, resource.id, clampNonNegative(toNumber(next)));
+                                                                    value={inputValue}
+                                                                    onFocus={(event) => {
+                                                                        setAllocationInputDrafts((prev) => (
+                                                                            prev[draftKey] !== undefined
+                                                                                ? prev
+                                                                                : { ...prev, [draftKey]: formatEditableNumber(allocationHours) }
+                                                                        ));
+                                                                        selectInputValueOnFocus(event);
                                                                     }}
-                                                                    onBlur={() => persist(rows)}
+                                                                    onChange={(e) => {
+                                                                        const next = sanitizeDecimalDraft(e.target.value);
+                                                                        setAllocationInputDrafts((prev) => ({
+                                                                            ...prev,
+                                                                            [draftKey]: next,
+                                                                        }));
+                                                                    }}
+                                                                    onBlur={() => commitAllocationInput(row.id, resource.id)}
                                                                     onDoubleClick={() => handleEditAllocationNote(row.id, resource.id, row.client, resource.name)}
                                                                     title={`ClickUp Planned: ${clickupHours.toFixed(1)}h | Logged Actuals: ${actualHours.toFixed(1)}h${noteHint}`}
                                                                     className={cn(
@@ -1251,20 +1337,6 @@ export function CapacityGrid({
                                             {Number(rowActualTotal ?? 0).toFixed(1)}
                                         </td>
                                     )}
-                                    <td className={cn("px-3 py-2 text-right border-r font-medium", laneBorderClass, rowTotal >= rowMin ? "text-white" : "text-slate-400")}>
-                                        {rowMin.toFixed(1)}
-                                    </td>
-                                    <td className={cn("px-3 py-2 text-right border-r font-medium", laneBorderClass, rowMax >= rowTotal ? "text-text-main" : "text-slate-300")}>
-                                        {rowMax.toFixed(1)}
-                                    </td>
-                                    <td className={cn("px-2 py-2 border-r", laneBorderClass)}>
-                                        <input
-                                            value={row.notes}
-                                            onChange={(e) => updateRow(row.id, { notes: e.target.value })}
-                                            onBlur={() => persist(rows)}
-                                            className="w-72 rounded-lg border border-transparent bg-white/[0.02] px-2 py-1 text-text-main focus:border-border/70 focus:bg-white/[0.04]"
-                                        />
-                                    </td>
                                 </tr>
                             );
                         })}
@@ -1293,27 +1365,10 @@ export function CapacityGrid({
                                     </div>
                                 </td>
                             )}
-                            <td className="px-3 py-2 text-right font-semibold border-r border-border/30 text-text-main">
-                                <div className="inline-flex min-w-[5rem] justify-end rounded border border-border/35 bg-surface/30 px-2 py-1">
-                                    {totals.wkMinTotal.toFixed(1)}
-                                </div>
-                            </td>
-                            <td className="px-3 py-2 text-right font-semibold border-r border-border/30 text-text-main">
-                                <div className="inline-flex min-w-[5rem] justify-end rounded border border-border/35 bg-surface/30 px-2 py-1">
-                                    {totals.wkMaxTotal.toFixed(1)}
-                                </div>
-                            </td>
-                            <td className="px-3 py-2 text-xs text-text-muted border-r border-border/30">
-                                <div className="flex items-center gap-1">
-                                    <Grid2x2 className="w-3.5 h-3.5" />
-                                    Calculated fields are formula-driven
-                                </div>
-                            </td>
-                            <td className="px-3 py-2"></td>
                         </tr>
                         <tr className="border-t border-border/30 bg-surface/20">
                             <td className="px-3 py-2 font-semibold text-text-main border-r border-border/30">
-                                Billable Capacity
+                                Consultant Actuals
                             </td>
                             {visibleResources.map((resource) => (
                                 <td key={`cap-${resource.id}`} className="px-2 py-2 border-r border-border/20 text-center text-[11px] font-semibold text-slate-300">
@@ -1330,11 +1385,6 @@ export function CapacityGrid({
                             {gridMode === "view" && (
                                 <td className="px-3 py-2 text-right font-semibold border-r border-border/30 text-slate-300">-</td>
                             )}
-                            <td className="px-3 py-2 text-right font-semibold border-r border-border/30 text-slate-300">-</td>
-                            <td className="px-3 py-2 text-right font-semibold border-r border-border/30 text-slate-300">-</td>
-                            <td className="px-3 py-2 text-xs text-text-muted border-r border-border/30">
-                                Pulled from Consultant Utilization billable capacity
-                            </td>
                         </tr>
                     </tfoot>
                 </table>

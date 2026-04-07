@@ -199,6 +199,24 @@ export function CapacityTrends({
         return (planned / capacity) * 100;
     };
 
+    const getConsultantWeekMetrics = (week: string, consultant: { id: number; name: string; key: string }) => {
+        const weekHours = weeklyHoursByConsultant.get(week);
+        const planned =
+            weekHours?.byId.get(consultant.id) ||
+            weekHours?.byName.get(normalizeName(consultant.name)) ||
+            0;
+        const capacity = Number(
+            capacityByWeekAndConsultant.get(`${week}|${consultant.key}`)
+            ?? 40
+        );
+        const utilization = capacity > 0 ? (Number(planned) / capacity) * 100 : 0;
+        return {
+            planned: Number(Number(planned || 0).toFixed(1)),
+            capacity: Number(capacity.toFixed(1)),
+            utilization,
+        };
+    };
+
     const cellClass = (utilization: number) => {
         if (utilization >= 80) return "bg-emerald-500/25 border-emerald-400/40 text-emerald-200";
         if (utilization >= 50) return "bg-yellow-500/20 border-yellow-400/40 text-yellow-100";
@@ -349,7 +367,7 @@ export function CapacityTrends({
                         <div className="text-2xl font-bold text-white mt-1">{overallForActiveWeek.totalPlanned.toFixed(1)}</div>
                     </div>
                     <div className="border border-border/40 rounded-lg bg-surface/20 p-3">
-                        <div className="text-[11px] uppercase text-text-muted">Billable Capacity</div>
+                        <div className="text-[11px] uppercase text-text-muted">Actuals Capacity</div>
                         <div className="text-2xl font-bold text-cyan-200 mt-1">{overallForActiveWeek.totalBillable.toFixed(1)}</div>
                     </div>
                 </div>
@@ -413,7 +431,7 @@ export function CapacityTrends({
                                 <th className="px-4 py-2 text-right">vs 80%</th>
                                 <th className="px-4 py-2 text-right">vs 50%</th>
                                 <th className="px-4 py-2 text-right">Planned Hrs</th>
-                                <th className="px-4 py-2 text-right">Billable Capacity</th>
+                                <th className="px-4 py-2 text-right">Actuals Capacity</th>
                                 <th className="px-4 py-2">Status</th>
                             </tr>
                         </thead>
@@ -456,7 +474,7 @@ export function CapacityTrends({
                 <div className="px-5 py-3 border-b border-border/50 bg-surface/30 flex items-center gap-2">
                     <Activity className="w-4 h-4 text-blue-400" />
                     <h3 className="text-sm font-semibold text-text-main">RESOURCE UTILIZATION BY WEEK</h3>
-                    <span className="text-xs text-text-muted">Person-level under/over utilization</span>
+                    <span className="text-xs text-text-muted">Person-level planned hours, actuals capacity, and utilization by week</span>
                 </div>
 
                 <div className="px-5 py-3 border-b border-border/30 flex items-center gap-4 text-xs">
@@ -484,11 +502,12 @@ export function CapacityTrends({
                                         {consultant.name}
                                     </td>
                                     {weeks.map((week) => {
-                                        const utilization = getUtilization(week, consultant);
+                                        const metrics = getConsultantWeekMetrics(week, consultant);
                                         return (
                                             <td key={`${consultant.key}-${week}`} className="px-2 py-2">
-                                                <div className={cn("rounded border text-center py-1.5 font-semibold tabular-nums", cellClass(utilization))}>
-                                                    {utilization.toFixed(1)}%
+                                                <div className={cn("rounded border px-2 py-1.5 text-center tabular-nums", cellClass(metrics.utilization))}>
+                                                    <div className="text-[12px] font-semibold">{metrics.utilization.toFixed(1)}%</div>
+                                                    <div className="mt-1 text-[10px] opacity-85">{metrics.planned.toFixed(1)} / {metrics.capacity.toFixed(1)}h</div>
                                                 </div>
                                             </td>
                                         );

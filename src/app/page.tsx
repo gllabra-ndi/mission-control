@@ -18,6 +18,7 @@ import {
     getConsultantConfigsForYear,
     getCapacityGridConfigsForYear,
     getEditableTaskBillableRollups,
+    getEditableTaskPlannedRollups,
     getTaskSidebarStructure
 } from "@/app/actions";
 import { requireAppSession } from "@/lib/auth";
@@ -99,6 +100,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         previousLeadConfigs,
         previousClientConfigs,
         previousConsultantConfigs,
+        initialTaskPlannedRollups,
         initialTaskBillableRollups,
         previousTaskBillableRollups,
         initialSidebarStructure
@@ -118,6 +120,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         getLeadConfigs(previousWeekStartStr),
         getClientConfigs(previousWeekStartStr),
         getConsultantConfigs(previousWeekStartStr),
+        getEditableTaskPlannedRollups(weekStartStr),
         getEditableTaskBillableRollups(weekStartStr),
         getEditableTaskBillableRollups(previousWeekStartStr),
         getTaskSidebarStructure(),
@@ -331,6 +334,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
             initialSelectedListId={initialSelectedListId}
             initialSelectedFolderId={initialSelectedFolderId}
             initialAssigneeFilter={initialAssigneeFilter}
+            initialTaskPlannedRollups={initialTaskPlannedRollups}
             initialTaskBillableRollups={initialTaskBillableRollups}
             initialSidebarStructure={initialSidebarStructure}
             dbConfig={{
@@ -344,6 +348,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
                 capacityGridConfig,
                 consultantConfigsForYear,
                 capacityGridConfigsForYear,
+                taskPlannedRollups: initialTaskPlannedRollups,
                 previousWeekStartStr,
                 previousLeadConfigs,
                 previousClientConfigs,

@@ -3,6 +3,8 @@ import "server-only";
 import crypto from "crypto";
 import { prisma } from "@/lib/prisma";
 
+type NetSuiteQueryValue = string | number | boolean | null | undefined;
+
 export interface NetSuiteConfig {
     accountId: string;
     realm: string;
@@ -11,12 +13,158 @@ export interface NetSuiteConfig {
     consumerSecret: string;
     tokenId: string;
     tokenSecret: string;
-    healthPath: string;
+    restletPath: string;
+    discoveryScriptId: string;
+    discoveryDeployId: string;
+    timeEntryScriptId: string;
+    timeEntryDeployId: string;
 }
 
 export interface NetSuiteConfigValidation {
     config: NetSuiteConfig | null;
     missing: string[];
+}
+
+export interface NetSuiteGovernance {
+    remaining?: number;
+}
+
+export interface NetSuitePagination {
+    limit?: number;
+    offset?: number;
+    count?: number;
+}
+
+export interface NetSuiteRestletSuccessEnvelope<T> {
+    success: true;
+    data: T;
+    _governance?: NetSuiteGovernance;
+    _pagination?: NetSuitePagination;
+}
+
+export interface NetSuiteRestletErrorEnvelope {
+    success: false;
+    error: string;
+    code?: string;
+    _governance?: NetSuiteGovernance;
+    _pagination?: NetSuitePagination;
+}
+
+export type NetSuiteRestletEnvelope<T> =
+    | NetSuiteRestletSuccessEnvelope<T>
+    | NetSuiteRestletErrorEnvelope;
+
+export interface NetSuiteRestletResult<T> {
+    ok: boolean;
+    status: number;
+    endpoint: string;
+    payload: NetSuiteRestletEnvelope<T> | null;
+    data?: T;
+    error?: string;
+    code?: string;
+    missing?: string[];
+    message?: string;
+    governanceRemaining?: number;
+    pagination?: NetSuitePagination;
+}
+
+export interface NetSuiteEmployeeRecord {
+    id: string;
+    entityid: string;
+    email: string;
+    firstname: string;
+    lastname: string;
+    title?: string;
+    department?: string;
+    departmentText?: string;
+    supervisor?: string;
+    supervisorText?: string;
+    hiredate?: string;
+}
+
+export interface NetSuiteProjectRecord {
+    id: string;
+    entityid: string;
+    companyname: string;
+    parent?: string;
+    parentText?: string;
+    status?: string;
+    statusText?: string;
+    startdate?: string;
+    enddate?: string;
+    projectmanager?: string;
+    projectmanagerText?: string;
+}
+
+export interface NetSuiteServiceItemRecord {
+    id: string;
+    itemid: string;
+    displayname?: string;
+    description?: string;
+}
+
+export interface NetSuiteTimeEntryRecord {
+    timeBillId: string;
+    employee?: string | number | null;
+    customer?: string | number | null;
+    hours?: number | null;
+    trandate?: string | null;
+    memo?: string | null;
+    isBillable?: boolean | null;
+    item?: string | number | null;
+    caseTaskEvent?: string | number | null;
+    externalId?: string | null;
+}
+
+export interface NetSuiteCreateTimeEntryInput {
+    externalId: string;
+    employeeEmail?: string;
+    employeeId?: number;
+    customer?: number;
+    hours: number;
+    date: string;
+    memo?: string;
+    isBillable?: boolean;
+    item?: number | string;
+    caseTaskEvent?: number | null;
+    formId?: number | null;
+}
+
+export interface NetSuiteUpdateTimeEntryInput {
+    externalId?: string;
+    timeBillId?: number;
+    hours?: number;
+    date?: string;
+    memo?: string;
+    isBillable?: boolean;
+    customer?: number;
+    item?: number | string;
+    caseTaskEvent?: number | null;
+}
+
+export interface NetSuiteCreateTimeEntryResponse {
+    timeBillId: string;
+    externalId: string;
+    duplicate?: boolean;
+}
+
+export interface NetSuiteBatchCreateTimeEntriesResponse {
+    created: Array<{ index: number; timeBillId: string; externalId: string }>;
+    skipped: Array<{ index: number; externalId: string; timeBillId?: string; reason?: string }>;
+    errors: Array<{ index: number; externalId?: string; error: string }>;
+}
+
+export interface NetSuiteUpdateTimeEntryResponse {
+    timeBillId: string;
+    updated: boolean;
+}
+
+export interface NetSuiteSearchTimeEntriesResponse {
+    results: NetSuiteTimeEntryRecord[];
+    count: number;
+    offset: number;
+    limit: number;
+    hasMore: boolean;
 }
 
 export interface NetSuiteConsultantRecord {
@@ -75,7 +223,7 @@ function normalizeParams(url: URL, oauthParams: Record<string, string>): string 
         return a[0].localeCompare(b[0]);
     });
 
-    return pairs.map(([k, v]) => `${k}=${v}`).join("&");
+    return pairs.map(([key, value]) => `${key}=${value}`).join("&");
 }
 
 function buildSignatureBaseString(method: string, url: URL, normalizedParams: string): string {
@@ -110,7 +258,7 @@ function sanitizeBaseUrl(rawBaseUrl: string): string {
 
 function buildBaseUrl(accountId: string, baseUrl?: string): string {
     if (baseUrl && baseUrl.trim().length > 0) return sanitizeBaseUrl(baseUrl);
-    return `https://${accountId}.suitetalk.api.netsuite.com`;
+    return `https://${accountId}.restlets.api.netsuite.com`;
 }
 
 function normalizePath(path: string): string {
@@ -145,10 +293,19 @@ function normalizeBoolean(value: unknown): boolean {
 function splitFullName(fullName: string): { firstName: string; lastName: string } {
     const normalized = normalizeString(fullName);
     if (!normalized) return { firstName: "", lastName: "" };
+    const commaTokens = normalized.split(",").map((token) => token.trim()).filter(Boolean);
+    if (commaTokens.length === 2) {
+        return {
+            firstName: commaTokens[1],
+            lastName: commaTokens[0],
+        };
+    }
+
     const tokens = normalized.split(/\s+/).filter(Boolean);
     if (tokens.length <= 1) {
         return { firstName: normalized, lastName: "" };
     }
+
     return {
         firstName: tokens.slice(0, -1).join(" "),
         lastName: tokens.slice(-1).join(" "),
@@ -159,25 +316,585 @@ function buildFullName(firstName: string, lastName: string): string {
     return `${normalizeString(firstName)} ${normalizeString(lastName)}`.trim();
 }
 
-function getNetSuiteItems(payload: any): any[] {
-    if (Array.isArray(payload)) return payload;
-    if (Array.isArray(payload?.items)) return payload.items;
-    if (Array.isArray(payload?.results)) return payload.results;
-    if (Array.isArray(payload?.employees)) return payload.employees;
-    if (Array.isArray(payload?.data?.items)) return payload.data.items;
-    if (Array.isArray(payload?.data?.results)) return payload.data.results;
-    return [];
+function toQueryValue(value: NetSuiteQueryValue): string | null {
+    if (value == null) return null;
+    if (typeof value === "string") {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? String(value) : null;
+    }
+    if (typeof value === "boolean") {
+        return value ? "true" : "false";
+    }
+    return normalizeString(value);
 }
 
-function getNetSuiteNextLink(payload: any): string | null {
-    const links = Array.isArray(payload?.links)
-        ? payload.links
-        : Array.isArray(payload?.data?.links)
-        ? payload.data.links
-        : [];
-    const nextLink = links.find((link: any) => normalizeString(link?.rel).toLowerCase() === "next");
-    const href = normalizeString(nextLink?.href);
-    return href || null;
+function buildRestletPath(path: string, params: Record<string, NetSuiteQueryValue>): string {
+    const normalizedPath = normalizePath(path);
+    const isAbsoluteUrl = /^https?:\/\//i.test(normalizedPath);
+    const url = isAbsoluteUrl
+        ? new URL(normalizedPath)
+        : new URL(normalizedPath, "https://netsuite.local");
+
+    Object.entries(params).forEach(([key, value]) => {
+        const normalizedValue = toQueryValue(value);
+        if (normalizedValue === null) return;
+        url.searchParams.set(key, normalizedValue);
+    });
+
+    return isAbsoluteUrl ? url.toString() : `${url.pathname}${url.search}`;
+}
+
+function getRestletStatusForErrorCode(code?: string): number {
+    switch (String(code || "").trim().toUpperCase()) {
+        case "MISSING_ACTION":
+        case "MISSING_PARAMS":
+        case "VALIDATION_FAILED":
+        case "BATCH_LIMIT_EXCEEDED":
+            return 400;
+        case "INVALID_ACTION":
+        case "METHOD_NOT_ALLOWED":
+            return 405;
+        case "NOT_FOUND":
+        case "RECORD_NOT_FOUND":
+            return 404;
+        case "RECORD_LOCKED":
+            return 409;
+        case "INTERNAL_ERROR":
+            return 500;
+        default:
+            return 502;
+    }
+}
+
+function buildSignedRequestHeaders(config: NetSuiteConfig, method: string, url: URL): Headers {
+    const oauthParams = buildOAuthParams(config);
+    const normalizedParams = normalizeParams(url, oauthParams);
+    const signatureBaseString = buildSignatureBaseString(method, url, normalizedParams);
+    const signingKey = `${percentEncode(config.consumerSecret)}&${percentEncode(config.tokenSecret)}`;
+    const signature = crypto
+        .createHmac("sha256", signingKey)
+        .update(signatureBaseString)
+        .digest("base64");
+
+    const headers = new Headers();
+    headers.set("Authorization", buildAuthorizationHeader(config, oauthParams, signature));
+    headers.set("Accept", "application/json");
+    headers.set("Content-Type", "application/json");
+    return headers;
+}
+
+export function getNetSuiteRestletPathFromEnv(): string {
+    return normalizePath(
+        process.env.NETSUITE_RESTLET_PATH ||
+        "/app/site/hosting/restlet.nl"
+    );
+}
+
+export function getNetSuiteDiscoveryScriptIdFromEnv(): string {
+    return normalizeString(process.env.NETSUITE_DISCOVERY_SCRIPT_ID || "2757");
+}
+
+export function getNetSuiteDiscoveryDeployIdFromEnv(): string {
+    return normalizeString(process.env.NETSUITE_DISCOVERY_DEPLOY_ID || "1");
+}
+
+export function getNetSuiteTimeEntryScriptIdFromEnv(): string {
+    return normalizeString(process.env.NETSUITE_TIME_ENTRY_SCRIPT_ID || "2758");
+}
+
+export function getNetSuiteTimeEntryDeployIdFromEnv(): string {
+    return normalizeString(process.env.NETSUITE_TIME_ENTRY_DEPLOY_ID || "1");
+}
+
+export function getNetSuiteConfigFromEnv(): NetSuiteConfigValidation {
+    const accountId = String(process.env.NETSUITE_ACCOUNT_ID || "").trim();
+    const consumerKey = String(process.env.NETSUITE_CONSUMER_KEY || "").trim();
+    const consumerSecret = String(process.env.NETSUITE_CONSUMER_SECRET || "").trim();
+    const tokenId = String(process.env.NETSUITE_TOKEN_ID || "").trim();
+    const tokenSecret = String(process.env.NETSUITE_TOKEN_SECRET || "").trim();
+    const realm = String(process.env.NETSUITE_REALM || accountId).trim();
+
+    const missing: string[] = [];
+    if (!accountId) missing.push("NETSUITE_ACCOUNT_ID");
+    if (!consumerKey) missing.push("NETSUITE_CONSUMER_KEY");
+    if (!consumerSecret) missing.push("NETSUITE_CONSUMER_SECRET");
+    if (!tokenId) missing.push("NETSUITE_TOKEN_ID");
+    if (!tokenSecret) missing.push("NETSUITE_TOKEN_SECRET");
+
+    if (missing.length > 0) return { config: null, missing };
+
+    const config: NetSuiteConfig = {
+        accountId,
+        realm,
+        baseUrl: buildBaseUrl(accountId, process.env.NETSUITE_BASE_URL),
+        consumerKey,
+        consumerSecret,
+        tokenId,
+        tokenSecret,
+        restletPath: getNetSuiteRestletPathFromEnv(),
+        discoveryScriptId: getNetSuiteDiscoveryScriptIdFromEnv(),
+        discoveryDeployId: getNetSuiteDiscoveryDeployIdFromEnv(),
+        timeEntryScriptId: getNetSuiteTimeEntryScriptIdFromEnv(),
+        timeEntryDeployId: getNetSuiteTimeEntryDeployIdFromEnv(),
+    };
+
+    return { config, missing: [] };
+}
+
+function buildDiscoveryRestletPath(
+    config: NetSuiteConfig,
+    params: Record<string, NetSuiteQueryValue>
+): string {
+    return buildRestletPath(config.restletPath, {
+        script: config.discoveryScriptId,
+        deploy: config.discoveryDeployId,
+        ...params,
+    });
+}
+
+function buildTimeEntryRestletPath(
+    config: NetSuiteConfig,
+    params: Record<string, NetSuiteQueryValue>
+): string {
+    return buildRestletPath(config.restletPath, {
+        script: config.timeEntryScriptId,
+        deploy: config.timeEntryDeployId,
+        ...params,
+    });
+}
+
+export async function netSuiteRequest(
+    config: NetSuiteConfig,
+    path: string,
+    options?: { method?: "GET" | "POST"; body?: unknown }
+): Promise<Response> {
+    const method = options?.method || "GET";
+    const url = buildRequestUrl(config, path);
+    const headers = buildSignedRequestHeaders(config, method, url);
+
+    const init: RequestInit = {
+        method,
+        headers,
+        cache: "no-store",
+    };
+
+    if (options?.body !== undefined) {
+        init.body = JSON.stringify(options.body);
+    }
+
+    return fetch(url.toString(), init);
+}
+
+async function netSuiteRestletRequest<T>(
+    config: NetSuiteConfig,
+    input: {
+        path: string;
+        method?: "GET" | "POST";
+        body?: unknown;
+    }
+): Promise<NetSuiteRestletResult<T>> {
+    const method = input.method || "GET";
+    const endpoint = buildRequestUrl(config, input.path).toString();
+
+    try {
+        const response = await netSuiteRequest(config, input.path, {
+            method,
+            body: input.body,
+        });
+        const text = await response.text();
+
+        let payload: NetSuiteRestletEnvelope<T> | null = null;
+        try {
+            payload = text ? JSON.parse(text) : null;
+        } catch {
+            return {
+                ok: false,
+                status: 502,
+                endpoint,
+                payload: null,
+                message: "NetSuite RESTlet response was not valid JSON",
+            };
+        }
+
+        const governanceRemaining = payload?._governance?.remaining;
+        const pagination = payload?._pagination;
+
+        if (payload?.success) {
+            return {
+                ok: response.ok,
+                status: response.status,
+                endpoint,
+                payload,
+                data: payload.data,
+                governanceRemaining,
+                pagination,
+            };
+        }
+
+        const errorStatus = response.ok
+            ? getRestletStatusForErrorCode(payload?.code)
+            : response.status;
+
+        return {
+            ok: false,
+            status: errorStatus,
+            endpoint,
+            payload,
+            error: payload?.error || "NetSuite RESTlet request failed",
+            code: payload?.code,
+            governanceRemaining,
+            pagination,
+        };
+    } catch (error: any) {
+        return {
+            ok: false,
+            status: 500,
+            endpoint,
+            payload: null,
+            message: String(error?.message || "Unknown NetSuite RESTlet error"),
+        };
+    }
+}
+
+export async function listNetSuiteEmployees(input?: {
+    limit?: number;
+    offset?: number;
+    department?: number;
+    supervisor?: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteEmployeeRecord[]>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteEmployeeRecord[]>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "listEmployees",
+            limit: input?.limit ?? 1000,
+            offset: input?.offset ?? 0,
+            department: input?.department,
+            supervisor: input?.supervisor,
+        }),
+        method: "GET",
+    });
+}
+
+export async function getNetSuiteEmployee(input: {
+    employeeId?: number;
+    email?: string;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteEmployeeRecord>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteEmployeeRecord>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "getEmployee",
+            employeeId: input.employeeId,
+            email: input.email,
+        }),
+        method: "GET",
+    });
+}
+
+export async function listNetSuiteProjects(input?: {
+    limit?: number;
+    offset?: number;
+    status?: number;
+    customer?: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteProjectRecord[]>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteProjectRecord[]>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "listProjects",
+            limit: input?.limit ?? 1000,
+            offset: input?.offset ?? 0,
+            status: input?.status,
+            customer: input?.customer,
+        }),
+        method: "GET",
+    });
+}
+
+export async function getNetSuiteProject(input: {
+    projectId: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteProjectRecord>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteProjectRecord>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "getProject",
+            projectId: input.projectId,
+        }),
+        method: "GET",
+    });
+}
+
+export async function listNetSuiteServiceItems(input?: {
+    limit?: number;
+    offset?: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteServiceItemRecord[]>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteServiceItemRecord[]>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "listServiceItems",
+            limit: input?.limit ?? 1000,
+            offset: input?.offset ?? 0,
+        }),
+        method: "GET",
+    });
+}
+
+export async function createNetSuiteTimeEntry(data: NetSuiteCreateTimeEntryInput) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteCreateTimeEntryResponse>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteCreateTimeEntryResponse>(config, {
+        path: buildTimeEntryRestletPath(config, {}),
+        method: "POST",
+        body: {
+            action: "createTimeEntry",
+            data,
+        },
+    });
+}
+
+export async function batchCreateNetSuiteTimeEntries(entries: NetSuiteCreateTimeEntryInput[]) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteBatchCreateTimeEntriesResponse>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteBatchCreateTimeEntriesResponse>(config, {
+        path: buildTimeEntryRestletPath(config, {}),
+        method: "POST",
+        body: {
+            action: "batchCreateTimeEntries",
+            entries,
+        },
+    });
+}
+
+export async function updateNetSuiteTimeEntry(data: NetSuiteUpdateTimeEntryInput) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteUpdateTimeEntryResponse>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteUpdateTimeEntryResponse>(config, {
+        path: buildTimeEntryRestletPath(config, {}),
+        method: "POST",
+        body: {
+            action: "updateTimeEntry",
+            data,
+        },
+    });
+}
+
+export async function getNetSuiteTimeEntry(input: {
+    externalId?: string;
+    timeBillId?: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteTimeEntryRecord>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteTimeEntryRecord>(config, {
+        path: buildTimeEntryRestletPath(config, {
+            action: "getTimeEntry",
+            externalId: input.externalId,
+            timeBillId: input.timeBillId,
+        }),
+        method: "GET",
+    });
+}
+
+export async function searchNetSuiteTimeEntries(input: {
+    employeeId?: number;
+    projectId?: number;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+    offset?: number;
+}) {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            endpoint: "",
+            payload: null,
+            missing,
+            message: "Missing NetSuite configuration",
+        } satisfies NetSuiteRestletResult<NetSuiteSearchTimeEntriesResponse>;
+    }
+
+    return netSuiteRestletRequest<NetSuiteSearchTimeEntriesResponse>(config, {
+        path: buildTimeEntryRestletPath(config, {
+            action: "searchTimeEntries",
+            employeeId: input.employeeId,
+            projectId: input.projectId,
+            dateFrom: input.dateFrom,
+            dateTo: input.dateTo,
+            limit: input.limit ?? 100,
+            offset: input.offset ?? 0,
+        }),
+        method: "GET",
+    });
+}
+
+async function fetchAllNetSuiteEmployees(input?: {
+    department?: number;
+    supervisor?: number;
+}): Promise<{
+    ok: boolean;
+    status: number;
+    sourcePath: string;
+    employees: NetSuiteEmployeeRecord[];
+    missing?: string[];
+    message?: string;
+}> {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            sourcePath: "",
+            employees: [],
+            missing,
+            message: "Missing NetSuite configuration",
+        };
+    }
+
+    const pageSize = 1000;
+    const employees: NetSuiteEmployeeRecord[] = [];
+    let offset = 0;
+    let pageCount = 0;
+    let sourcePath = buildDiscoveryRestletPath(config, {
+        action: "listEmployees",
+        limit: pageSize,
+        offset,
+        department: input?.department,
+        supervisor: input?.supervisor,
+    });
+
+    while (pageCount < 20) {
+        pageCount += 1;
+        const result = await netSuiteRestletRequest<NetSuiteEmployeeRecord[]>(config, {
+            path: buildDiscoveryRestletPath(config, {
+                action: "listEmployees",
+                limit: pageSize,
+                offset,
+                department: input?.department,
+                supervisor: input?.supervisor,
+            }),
+            method: "GET",
+        });
+
+        if (!result.ok || !Array.isArray(result.data)) {
+            return {
+                ok: false,
+                status: result.status,
+                sourcePath,
+                employees: [],
+                missing: result.missing,
+                message: result.error || result.message || "NetSuite employee fetch failed",
+            };
+        }
+
+        employees.push(...result.data);
+        const currentCount = result.pagination?.count ?? result.data.length;
+        if (currentCount < pageSize) break;
+        offset += currentCount;
+    }
+
+    return {
+        ok: true,
+        status: 200,
+        sourcePath,
+        employees,
+    };
 }
 
 function normalizeNetSuiteConsultant(record: any): NetSuiteConsultantRecord | null {
@@ -204,10 +921,10 @@ function normalizeNetSuiteConsultant(record: any): NetSuiteConsultantRecord | nu
         record?.familyName
     );
     const fullName = normalizeString(
-        record?.entityId ??
-        record?.entityid ??
         record?.name ??
         record?.fullName ??
+        record?.entityId ??
+        record?.entityid ??
         buildFullName(firstName, lastName)
     );
 
@@ -250,115 +967,10 @@ async function getNextNegativeConsultantId(): Promise<number> {
     return Number(existing.id) - 1;
 }
 
-export function getNetSuiteConsultantPathFromEnv(): string {
-    return normalizePath(
-        process.env.NETSUITE_CONSULTANT_PATH ||
-        "/services/rest/record/v1/employee?limit=1000"
-    );
-}
-
-export function getNetSuiteConfigFromEnv(): NetSuiteConfigValidation {
-    const accountId = String(process.env.NETSUITE_ACCOUNT_ID || "").trim();
-    const consumerKey = String(process.env.NETSUITE_CONSUMER_KEY || "").trim();
-    const consumerSecret = String(process.env.NETSUITE_CONSUMER_SECRET || "").trim();
-    const tokenId = String(process.env.NETSUITE_TOKEN_ID || "").trim();
-    const tokenSecret = String(process.env.NETSUITE_TOKEN_SECRET || "").trim();
-    const realm = String(process.env.NETSUITE_REALM || accountId).trim();
-    const healthPath = String(process.env.NETSUITE_HEALTH_PATH || "/services/rest/record/v1/metadata-catalog?limit=1").trim();
-
-    const missing: string[] = [];
-    if (!accountId) missing.push("NETSUITE_ACCOUNT_ID");
-    if (!consumerKey) missing.push("NETSUITE_CONSUMER_KEY");
-    if (!consumerSecret) missing.push("NETSUITE_CONSUMER_SECRET");
-    if (!tokenId) missing.push("NETSUITE_TOKEN_ID");
-    if (!tokenSecret) missing.push("NETSUITE_TOKEN_SECRET");
-
-    if (missing.length > 0) return { config: null, missing };
-
-    const config: NetSuiteConfig = {
-        accountId,
-        realm,
-        baseUrl: buildBaseUrl(accountId, process.env.NETSUITE_BASE_URL),
-        consumerKey,
-        consumerSecret,
-        tokenId,
-        tokenSecret,
-        healthPath: healthPath.startsWith("/") ? healthPath : `/${healthPath}`,
-    };
-
-    return { config, missing: [] };
-}
-
-function buildSignedRequestHeaders(config: NetSuiteConfig, method: string, url: URL): Headers {
-    const oauthParams = buildOAuthParams(config);
-    const normalizedParams = normalizeParams(url, oauthParams);
-    const signatureBaseString = buildSignatureBaseString(method, url, normalizedParams);
-    const signingKey = `${percentEncode(config.consumerSecret)}&${percentEncode(config.tokenSecret)}`;
-    const signature = crypto
-        .createHmac("sha256", signingKey)
-        .update(signatureBaseString)
-        .digest("base64");
-
-    const headers = new Headers();
-    headers.set("Authorization", buildAuthorizationHeader(config, oauthParams, signature));
-    headers.set("Accept", "application/json");
-    headers.set("Content-Type", "application/json");
-    return headers;
-}
-
-export async function netSuiteRequest(
-    config: NetSuiteConfig,
-    path: string,
-    options?: { method?: "GET" | "POST"; body?: unknown }
-): Promise<Response> {
-    const method = options?.method || "GET";
-    const url = buildRequestUrl(config, path);
-    const headers = buildSignedRequestHeaders(config, method, url);
-
-    const init: RequestInit = {
-        method,
-        headers,
-        cache: "no-store",
-    };
-
-    if (options?.body !== undefined) {
-        init.body = JSON.stringify(options.body);
-    }
-
-    return fetch(url.toString(), init);
-}
-
-export async function netSuiteHealthCheck() {
-    const { config, missing } = getNetSuiteConfigFromEnv();
-    if (!config) {
-        return {
-            ok: false,
-            status: 400,
-            message: "Missing NetSuite configuration",
-            missing,
-        };
-    }
-
-    try {
-        const response = await netSuiteRequest(config, config.healthPath, { method: "GET" });
-        const text = await response.text();
-        return {
-            ok: response.ok,
-            status: response.status,
-            endpoint: `${config.baseUrl}${config.healthPath}`,
-            bodyPreview: text.slice(0, 1000),
-        };
-    } catch (error: any) {
-        return {
-            ok: false,
-            status: 500,
-            endpoint: `${config.baseUrl}${config.healthPath}`,
-            message: String(error?.message || "Unknown NetSuite connection error"),
-        };
-    }
-}
-
-export async function fetchNetSuiteConsultants(path?: string): Promise<{
+export async function fetchNetSuiteConsultants(input?: {
+    department?: number;
+    supervisor?: number;
+}): Promise<{
     ok: boolean;
     status: number;
     sourcePath: string;
@@ -368,105 +980,58 @@ export async function fetchNetSuiteConsultants(path?: string): Promise<{
     missing?: string[];
     message?: string;
 }> {
-    const { config, missing } = getNetSuiteConfigFromEnv();
-    const sourcePath = normalizePath(path || getNetSuiteConsultantPathFromEnv());
+    const fetched = await fetchAllNetSuiteEmployees(input);
 
-    if (!config) {
+    if (!fetched.ok) {
         return {
             ok: false,
-            status: 400,
-            sourcePath,
+            status: fetched.status,
+            sourcePath: fetched.sourcePath,
             consultants: [],
             skippedInactive: 0,
             skippedInvalid: 0,
-            missing,
-            message: "Missing NetSuite configuration",
+            missing: fetched.missing,
+            message: fetched.message,
         };
     }
 
     const consultantsByExternalId = new Map<string, NetSuiteConsultantRecord>();
-    let nextPath: string | null = sourcePath;
-    let pageCount = 0;
     let skippedInactive = 0;
     let skippedInvalid = 0;
 
-    try {
-        while (nextPath && pageCount < 20) {
-            pageCount += 1;
-            const response = await netSuiteRequest(config, nextPath, { method: "GET" });
-            const text = await response.text();
-
-            if (!response.ok) {
-                return {
-                    ok: false,
-                    status: response.status,
-                    sourcePath,
-                    consultants: [],
-                    skippedInactive,
-                    skippedInvalid,
-                    message: text.slice(0, 1000) || "NetSuite consultant fetch failed",
-                };
-            }
-
-            let payload: any = null;
-            try {
-                payload = text ? JSON.parse(text) : null;
-            } catch {
-                return {
-                    ok: false,
-                    status: 502,
-                    sourcePath,
-                    consultants: [],
-                    skippedInactive,
-                    skippedInvalid,
-                    message: "NetSuite consultant response was not valid JSON",
-                };
-            }
-
-            const items = getNetSuiteItems(payload);
-            items.forEach((item: any) => {
-                const consultant = normalizeNetSuiteConsultant(item);
-                if (!consultant) {
-                    skippedInvalid += 1;
-                    return;
-                }
-                if (consultant.isInactive) {
-                    skippedInactive += 1;
-                    return;
-                }
-                consultantsByExternalId.set(consultant.externalId, consultant);
-            });
-
-            nextPath = getNetSuiteNextLink(payload);
+    fetched.employees.forEach((employee) => {
+        const consultant = normalizeNetSuiteConsultant(employee);
+        if (!consultant) {
+            skippedInvalid += 1;
+            return;
         }
+        if (consultant.isInactive) {
+            skippedInactive += 1;
+            return;
+        }
+        consultantsByExternalId.set(consultant.externalId, consultant);
+    });
 
-        return {
-            ok: true,
-            status: 200,
-            sourcePath,
-            consultants: Array.from(consultantsByExternalId.values()).sort((a, b) => a.fullName.localeCompare(b.fullName)),
-            skippedInactive,
-            skippedInvalid,
-        };
-    } catch (error: any) {
-        return {
-            ok: false,
-            status: 500,
-            sourcePath,
-            consultants: [],
-            skippedInactive,
-            skippedInvalid,
-            message: String(error?.message || "Unknown NetSuite consultant sync error"),
-        };
-    }
+    return {
+        ok: true,
+        status: 200,
+        sourcePath: fetched.sourcePath,
+        consultants: Array.from(consultantsByExternalId.values()).sort((a, b) => a.fullName.localeCompare(b.fullName)),
+        skippedInactive,
+        skippedInvalid,
+    };
 }
 
 export async function syncNetSuiteConsultants(options?: {
-    path?: string;
     dryRun?: boolean;
+    department?: number;
+    supervisor?: number;
 }): Promise<NetSuiteConsultantSyncResult> {
     const dryRun = Boolean(options?.dryRun);
-    const fetched = await fetchNetSuiteConsultants(options?.path);
+    const fetched = await fetchNetSuiteConsultants({
+        department: options?.department,
+        supervisor: options?.supervisor,
+    });
 
     if (!fetched.ok) {
         return {
@@ -599,5 +1164,68 @@ export async function syncNetSuiteConsultants(options?: {
         skippedInvalid: fetched.skippedInvalid,
         dryRun,
         consultants: dryRun ? consultants : undefined,
+    };
+}
+
+export async function netSuiteHealthCheck() {
+    const { config, missing } = getNetSuiteConfigFromEnv();
+    if (!config) {
+        return {
+            ok: false,
+            status: 400,
+            message: "Missing NetSuite configuration",
+            missing,
+        };
+    }
+
+    const discovery = await netSuiteRestletRequest<NetSuiteEmployeeRecord[]>(config, {
+        path: buildDiscoveryRestletPath(config, {
+            action: "listEmployees",
+            limit: 1,
+            offset: 0,
+        }),
+        method: "GET",
+    });
+
+    const timeEntries = await netSuiteRestletRequest<NetSuiteSearchTimeEntriesResponse>(config, {
+        path: buildTimeEntryRestletPath(config, {
+            action: "searchTimeEntries",
+            dateFrom: "2100-01-01",
+            dateTo: "2100-01-01",
+            limit: 1,
+            offset: 0,
+        }),
+        method: "GET",
+    });
+
+    const ok = discovery.ok && timeEntries.ok;
+    const status = ok ? 200 : Math.max(discovery.status, timeEntries.status);
+
+    return {
+        ok,
+        status,
+        baseUrl: config.baseUrl,
+        restletPath: config.restletPath,
+        deploymentStatusNote: "NetSuite RESTlet deployments are documented as TESTING and must be switched to RELEASED before production traffic.",
+        discovery: {
+            ok: discovery.ok,
+            status: discovery.status,
+            scriptId: config.discoveryScriptId,
+            deployId: config.discoveryDeployId,
+            endpoint: discovery.endpoint,
+            code: discovery.code,
+            error: discovery.error || discovery.message,
+            governanceRemaining: discovery.governanceRemaining,
+        },
+        timeEntries: {
+            ok: timeEntries.ok,
+            status: timeEntries.status,
+            scriptId: config.timeEntryScriptId,
+            deployId: config.timeEntryDeployId,
+            endpoint: timeEntries.endpoint,
+            code: timeEntries.code,
+            error: timeEntries.error || timeEntries.message,
+            governanceRemaining: timeEntries.governanceRemaining,
+        },
     };
 }

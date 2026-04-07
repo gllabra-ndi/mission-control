@@ -9,6 +9,16 @@ import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
+import {
+    getEffectiveEditableTaskStatus,
+    getWeekStartKeyForDate,
+    isEditableTaskVisibleInWeek,
+    normalizeDateKey,
+    normalizeEditableTaskLifecycle,
+    normalizeEditableTaskStatus,
+    normalizeEstimateHours,
+    normalizeWeekKey,
+} from "@/lib/editableTaskLifecycle";
 
 export interface CapacityGridResource {
     id: string;
@@ -133,14 +143,19 @@ export interface EditableTaskSeed {
     description?: string;
     assignee?: string;
     isAi?: boolean;
+    estimateHours?: number;
     billableHoursToday?: number;
     week: string;
+    plannedWeek?: string;
+    closedDate?: string;
     status: "backlog" | "open" | "closed";
 }
 
 export interface EditableTaskRecord {
     id: string;
     week: string;
+    plannedWeek: string;
+    closedDate: string;
     scopeType: string;
     scopeId: string;
     sourceTaskId?: string | null;
@@ -148,6 +163,7 @@ export interface EditableTaskRecord {
     description: string;
     assignee: string;
     isAi: boolean;
+    estimateHours: number;
     billableHoursToday: number;
     status: "backlog" | "open" | "closed";
     position: number;
@@ -179,6 +195,14 @@ export interface EditableTaskBillableEntryRecord {
 }
 
 export interface EditableTaskBillableRollupRecord {
+    scopeType: string;
+    scopeId: string;
+    assignee: string;
+    hours: number;
+    sourceTaskId?: string | null;
+}
+
+export interface EditableTaskPlannedRollupRecord {
     scopeType: string;
     scopeId: string;
     assignee: string;
@@ -507,13 +531,6 @@ function resourceIdFromName(name: string) {
     return id.length > 0 ? id : `resource-${Date.now()}`;
 }
 
-function normalizeEditableTaskStatus(value: string): "backlog" | "open" | "closed" {
-    const normalized = String(value || "").trim().toLowerCase();
-    if (normalized === "closed") return "closed";
-    if (normalized === "open") return "open";
-    return "backlog";
-}
-
 function getTaskAttachmentStorageDir() {
     return path.join(process.cwd(), ".task-attachments");
 }
@@ -546,6 +563,32 @@ function mapEditableTaskBillableEntry(row: any): EditableTaskBillableEntryRecord
         isValueAdd: Boolean(row.isValueAdd ?? false),
         createdAt: new Date(row.createdAt).toISOString(),
         updatedAt: new Date(row.updatedAt).toISOString(),
+    };
+}
+
+function mapEditableTask(row: any, activeWeek?: string): EditableTaskRecord {
+    return {
+        id: String(row.id),
+        week: String(row.week),
+        plannedWeek: normalizeWeekKey(row.plannedWeek) || "",
+        closedDate: normalizeDateKey(row.closedDate),
+        scopeType: String(row.scopeType),
+        scopeId: String(row.scopeId),
+        sourceTaskId: row.sourceTaskId ? String(row.sourceTaskId) : null,
+        subject: String(row.subject ?? ""),
+        description: String(row.description ?? ""),
+        assignee: String(row.assignee ?? ""),
+        isAi: Boolean(row.isAi ?? false),
+        estimateHours: Number(row.estimateHours ?? 0),
+        billableHoursToday: Number(row.billableHoursToday ?? 0),
+        status: getEffectiveEditableTaskStatus(row, activeWeek),
+        position: Number(row.position ?? 0),
+        attachments: Array.isArray(row.attachments)
+            ? row.attachments.map(mapEditableTaskAttachment)
+            : [],
+        billableEntries: Array.isArray(row.billableEntries)
+            ? row.billableEntries.map(mapEditableTaskBillableEntry)
+            : [],
     };
 }
 
@@ -2097,7 +2140,9 @@ export async function copyConsultantUtilizationFromPriorWeek(week: string, consu
         getCapacityGridConfig(previousWeek, consultants),
     ]);
 
-    const currentResources = Array.isArray(currentGrid?.resources) ? currentGrid.resources : [];
+    const currentResources = Array.isArray(currentGrid?.resources)
+        ? currentGrid.resources.filter((resource: any) => !Boolean(resource?.removed))
+        : [];
     const previousResources = Array.isArray(previousGrid?.resources) ? previousGrid.resources : [];
 
     const currentNameById = new Map<number, string>();
@@ -2123,20 +2168,6 @@ export async function copyConsultantUtilizationFromPriorWeek(week: string, consu
         }
     });
 
-    const consultantEntries = Array.isArray(consultants) ? consultants : [];
-    consultantEntries.forEach((entry) => {
-        if (typeof entry === "string") return;
-        const consultantId = Number(entry?.id ?? 0);
-        const consultantName = String(entry?.name ?? "").trim();
-        if (consultantId > 0 && consultantName) {
-            if (!currentNameById.has(consultantId)) currentNameById.set(consultantId, consultantName);
-            const nameKey = normalizeName(consultantName);
-            if (nameKey && !currentIdByName.has(nameKey)) {
-                currentIdByName.set(nameKey, consultantId);
-            }
-        }
-    });
-
     const copiedConsultantIds = new Set<number>();
 
     for (const row of previousConfigs) {
@@ -2157,16 +2188,12 @@ export async function copyConsultantUtilizationFromPriorWeek(week: string, consu
                 },
             },
             update: {
-                maxCapacity: Number(row.maxCapacity ?? 40),
                 billableCapacity: Number(row.billableCapacity ?? 40),
-                mtHrs: 0,
-                wPlusHrs: 0,
-                notes: "",
             },
             create: {
                 week,
                 consultantId: targetConsultantId,
-                maxCapacity: Number(row.maxCapacity ?? 40),
+                maxCapacity: 40,
                 billableCapacity: Number(row.billableCapacity ?? 40),
                 mtHrs: 0,
                 wPlusHrs: 0,
@@ -2219,6 +2246,7 @@ export async function loadDashboardWeekData(
         previousClientConfigs,
         previousConsultantConfigs,
         capacityGridConfig,
+        taskPlannedRollups,
         taskBillableRollups,
         previousTaskBillableRollups,
     ] = await Promise.all([
@@ -2231,6 +2259,7 @@ export async function loadDashboardWeekData(
         getClientConfigs(previousWeek),
         getConsultantConfigs(previousWeek),
         getCapacityGridConfig(week, consultants),
+        getEditableTaskPlannedRollups(week),
         getEditableTaskBillableRollups(week),
         getEditableTaskBillableRollups(previousWeek),
     ]);
@@ -2245,6 +2274,7 @@ export async function loadDashboardWeekData(
         previousClientConfigs,
         previousConsultantConfigs,
         capacityGridConfig,
+        taskPlannedRollups,
         taskBillableRollups,
         previousTaskBillableRollups,
     };
@@ -2261,12 +2291,42 @@ export async function getEditableTasks(
 
     const normalizedScopeType = String(scopeType || "all");
     const normalizedScopeId = String(scopeId || "all");
+    const normalizedWeek = normalizeWeekKey(week);
+
+    const legacyClosedRows = await editableTaskModel.findMany({
+        where: {
+            scopeType: normalizedScopeType,
+            scopeId: normalizedScopeId,
+            status: "closed",
+            closedDate: null,
+        },
+        select: {
+            id: true,
+            updatedAt: true,
+        },
+    });
+
+    for (const row of legacyClosedRows) {
+        const fallbackClosedDate = new Date(row.updatedAt).toISOString().slice(0, 10);
+        await editableTaskModel.update({
+            where: { id: String(row.id) },
+            data: {
+                closedDate: fallbackClosedDate,
+            },
+        });
+    }
 
     const existingRows = await editableTaskModel.findMany({
         where: {
-            week,
             scopeType: normalizedScopeType,
             scopeId: normalizedScopeId,
+            week: {
+                lte: normalizedWeek,
+            },
+            OR: [
+                { closedDate: null },
+                { closedDate: { gte: normalizedWeek } },
+            ],
         },
         include: {
             attachments: {
@@ -2286,54 +2346,37 @@ export async function getEditableTasks(
         ],
     });
 
-    const filteredSeedTasks = seedTasks.filter((task) => String(task?.week ?? "") === week);
-    const allowedSourceTaskIds = new Set(
-        filteredSeedTasks
+    const filteredSeedTasks = seedTasks.filter((task) => {
+        return isEditableTaskVisibleInWeek(task, normalizedWeek);
+    });
+    const allSeedSourceTaskIds = new Set(
+        seedTasks
             .map((task) => String(task?.sourceTaskId ?? "").trim())
             .filter(Boolean)
     );
-    const canonicalStatusBySourceTaskId = new Map<string, { status: "backlog" | "open" | "closed"; priority: number; updatedAtMs: number }>();
-
-    if (allowedSourceTaskIds.size > 0) {
-        const siblingRows = await editableTaskModel.findMany({
-            where: {
-                week,
-                sourceTaskId: {
-                    in: Array.from(allowedSourceTaskIds),
-                },
+    const allScopedSourceRows = await editableTaskModel.findMany({
+        where: {
+            scopeType: normalizedScopeType,
+            scopeId: normalizedScopeId,
+            sourceTaskId: {
+                not: null,
             },
-            select: {
-                sourceTaskId: true,
-                scopeType: true,
-                scopeId: true,
-                status: true,
-                updatedAt: true,
-            },
-        });
+        },
+    });
+    const scopedSourceRowsBySourceTaskId = new Map<string, any[]>();
+    allScopedSourceRows.forEach((row: any) => {
+        const sourceTaskId = String(row?.sourceTaskId ?? "").trim();
+        if (!sourceTaskId) return;
+        const current = scopedSourceRowsBySourceTaskId.get(sourceTaskId) ?? [];
+        current.push(row);
+        scopedSourceRowsBySourceTaskId.set(sourceTaskId, current);
+    });
 
-        siblingRows.forEach((row: any) => {
-            const sourceTaskId = String(row?.sourceTaskId ?? "").trim();
-            if (!sourceTaskId) return;
-
-            const priority = String(row?.scopeType ?? "") === "all" && String(row?.scopeId ?? "") === "all" ? 1 : 2;
-            const updatedAtMs = new Date(row?.updatedAt ?? 0).getTime();
-            const current = canonicalStatusBySourceTaskId.get(sourceTaskId);
-
-            if (!current || priority > current.priority || (priority === current.priority && updatedAtMs >= current.updatedAtMs)) {
-                canonicalStatusBySourceTaskId.set(sourceTaskId, {
-                    status: normalizeEditableTaskStatus(String(row?.status ?? "backlog")),
-                    priority,
-                    updatedAtMs,
-                });
-            }
-        });
-    }
-
-    const stalePlaceholderIds = allowedSourceTaskIds.size > 0
-        ? existingRows
+    const stalePlaceholderIds = allSeedSourceTaskIds.size > 0
+        ? allScopedSourceRows
             .filter((row: any) => {
                 const sourceTaskId = String(row?.sourceTaskId ?? "").trim();
-                return sourceTaskId && !allowedSourceTaskIds.has(sourceTaskId);
+                return sourceTaskId && !allSeedSourceTaskIds.has(sourceTaskId);
             })
             .map((row: any) => String(row.id))
         : [];
@@ -2348,12 +2391,18 @@ export async function getEditableTasks(
         });
     }
 
-    const refreshedExistingRows = stalePlaceholderIds.length > 0
+        const refreshedExistingRows = stalePlaceholderIds.length > 0
         ? await editableTaskModel.findMany({
             where: {
-                week,
                 scopeType: normalizedScopeType,
                 scopeId: normalizedScopeId,
+                week: {
+                    lte: normalizedWeek,
+                },
+                OR: [
+                    { closedDate: null },
+                    { closedDate: { gte: normalizedWeek } },
+                ],
             },
             include: {
                 attachments: {
@@ -2380,20 +2429,28 @@ export async function getEditableTasks(
         positionByStatus.set(status, Math.max(Number(positionByStatus.get(status) ?? 0), Number(row?.position ?? 0)));
     });
 
-    const refreshedExistingBySourceTaskId = new Map(
-        refreshedExistingRows
-            .map((row: any) => [String(row?.sourceTaskId ?? "").trim(), row] as const)
-            .filter((entry: readonly [string, any]) => Boolean(entry[0]))
-    );
-
     for (const task of filteredSeedTasks) {
         const sourceTaskId = String(task?.sourceTaskId ?? "").trim();
-        const status = canonicalStatusBySourceTaskId.get(sourceTaskId)?.status
-            ?? normalizeEditableTaskStatus(String(task?.status ?? "backlog"));
         if (!sourceTaskId) continue;
 
-        const existingRow: any = refreshedExistingBySourceTaskId.get(sourceTaskId);
+        const normalizedSeed = normalizeEditableTaskLifecycle({
+            week: normalizeWeekKey(task?.week) || normalizedWeek,
+            plannedWeek: task?.plannedWeek,
+            closedDate: task?.closedDate,
+            status: task?.status,
+            estimateHours: task?.estimateHours,
+        });
+        const nextWeek = normalizedSeed.week || normalizedWeek;
+        const nextPlannedWeek = normalizedSeed.plannedWeek;
+        const nextClosedDate = normalizedSeed.closedDate;
+        const existingRowCandidates = scopedSourceRowsBySourceTaskId.get(sourceTaskId) ?? [];
+        const existingRow: any = existingRowCandidates.find((row) => normalizeWeekKey(row?.week) === nextWeek)
+            ?? (nextPlannedWeek
+                ? existingRowCandidates.find((row) => normalizeWeekKey(row?.plannedWeek) === nextPlannedWeek)
+                : null)
+            ?? existingRowCandidates[0];
         if (existingRow) {
+            const status = normalizeEditableTaskStatus(String(existingRow?.status ?? "backlog"));
             const updateData: Record<string, unknown> = {};
             if (String(existingRow.subject ?? "") !== String(task?.subject ?? "Untitled Task")) {
                 updateData.subject = String(task?.subject ?? "Untitled Task");
@@ -2404,14 +2461,13 @@ export async function getEditableTasks(
             if (Boolean(existingRow.isAi ?? false) !== Boolean(task?.isAi ?? false)) {
                 updateData.isAi = Boolean(task?.isAi ?? false);
             }
+            const existingEstimateHours = Number(existingRow.estimateHours ?? 0);
+            const seededEstimateHours = Number(normalizedSeed.estimateHours ?? 0);
+            if (existingEstimateHours <= 0 && seededEstimateHours > 0) {
+                updateData.estimateHours = seededEstimateHours;
+            }
             if (Number(existingRow.billableHoursToday ?? 0) !== Number(task?.billableHoursToday ?? 0)) {
                 updateData.billableHoursToday = Number(task?.billableHoursToday ?? 0);
-            }
-            if (normalizeEditableTaskStatus(String(existingRow?.status ?? "backlog")) !== status) {
-                updateData.status = status;
-            }
-            if (String(existingRow.week ?? "") !== week) {
-                updateData.week = week;
             }
 
             if (Object.keys(updateData).length > 0) {
@@ -2423,12 +2479,15 @@ export async function getEditableTasks(
             continue;
         }
 
+        const status = normalizeEditableTaskStatus(String(task?.status ?? "backlog"));
         const nextPosition = Number(positionByStatus.get(status) ?? 0) + 1;
         positionByStatus.set(status, nextPosition);
 
         await editableTaskModel.create({
             data: {
-                week,
+                week: nextWeek,
+                plannedWeek: nextPlannedWeek || null,
+                closedDate: nextClosedDate || null,
                 scopeType: normalizedScopeType,
                 scopeId: normalizedScopeId,
                 sourceTaskId,
@@ -2436,8 +2495,9 @@ export async function getEditableTasks(
                 description: String(task?.description ?? ""),
                 assignee: String(task?.assignee ?? ""),
                 isAi: Boolean(task?.isAi ?? false),
+                estimateHours: normalizedSeed.estimateHours,
                 billableHoursToday: Number(task?.billableHoursToday ?? 0),
-                status,
+                status: normalizedSeed.status,
                 position: nextPosition,
             },
         });
@@ -2445,9 +2505,15 @@ export async function getEditableTasks(
 
     const rows = await editableTaskModel.findMany({
         where: {
-            week,
             scopeType: normalizedScopeType,
             scopeId: normalizedScopeId,
+            week: {
+                lte: normalizedWeek,
+            },
+            OR: [
+                { closedDate: null },
+                { closedDate: { gte: normalizedWeek } },
+            ],
         },
         include: {
             attachments: {
@@ -2467,46 +2533,33 @@ export async function getEditableTasks(
         ],
     });
 
-    return rows.map((row: any) => ({
-        id: String(row.id),
-        week: String(row.week),
-        scopeType: String(row.scopeType),
-        scopeId: String(row.scopeId),
-        sourceTaskId: row.sourceTaskId ? String(row.sourceTaskId) : null,
-        subject: String(row.subject ?? ""),
-        description: String(row.description ?? ""),
-        assignee: String(row.assignee ?? ""),
-        isAi: Boolean(row.isAi ?? false),
-        billableHoursToday: Number(row.billableHoursToday ?? 0),
-        status: normalizeEditableTaskStatus(String(row.status ?? "backlog")),
-        position: Number(row.position ?? 0),
-        attachments: Array.isArray(row.attachments)
-            ? row.attachments.map(mapEditableTaskAttachment)
-            : [],
-        billableEntries: Array.isArray(row.billableEntries)
-            ? row.billableEntries.map(mapEditableTaskBillableEntry)
-            : [],
-    }));
+    return rows
+        .filter((row: any) => isEditableTaskVisibleInWeek(row, normalizedWeek))
+        .map((row: any) => mapEditableTask(row, normalizedWeek));
 }
 
 export async function createEditableTask(input: {
     week: string;
+    plannedWeek?: string;
+    closedDate?: string;
     scopeType: string;
     scopeId: string;
     subject: string;
     description?: string;
     assignee?: string;
     isAi?: boolean;
+    estimateHours?: number;
     billableHoursToday?: number;
     status?: "backlog" | "open" | "closed";
 }) {
     const editableTaskModel = (prisma as any).editableTask;
     if (!editableTaskModel) return null;
 
-    const status = normalizeEditableTaskStatus(String(input.status ?? "backlog"));
+    const normalizedLifecycle = normalizeEditableTaskLifecycle(input);
+    const status = normalizedLifecycle.status;
     const lastInStatus = await editableTaskModel.findFirst({
         where: {
-            week: String(input.week),
+            week: normalizedLifecycle.week,
             scopeType: String(input.scopeType),
             scopeId: String(input.scopeId),
             status,
@@ -2518,13 +2571,16 @@ export async function createEditableTask(input: {
 
     const created = await editableTaskModel.create({
         data: {
-            week: String(input.week),
+            week: normalizedLifecycle.week,
+            plannedWeek: normalizedLifecycle.plannedWeek || null,
+            closedDate: normalizedLifecycle.closedDate || null,
             scopeType: String(input.scopeType),
             scopeId: String(input.scopeId),
             subject: String(input.subject || "Untitled Task"),
             description: String(input.description ?? ""),
             assignee: String(input.assignee ?? ""),
             isAi: Boolean(input.isAi ?? false),
+            estimateHours: normalizedLifecycle.estimateHours,
             billableHoursToday: Number(input.billableHoursToday ?? 0),
             status,
             position: Number(lastInStatus?.position ?? 0) + 1,
@@ -2533,18 +2589,7 @@ export async function createEditableTask(input: {
 
     revalidatePath("/");
     return {
-        id: String(created.id),
-        week: String(created.week),
-        scopeType: String(created.scopeType),
-        scopeId: String(created.scopeId),
-        sourceTaskId: created.sourceTaskId ? String(created.sourceTaskId) : null,
-        subject: String(created.subject ?? ""),
-        description: String(created.description ?? ""),
-        assignee: String(created.assignee ?? ""),
-        isAi: Boolean(created.isAi ?? false),
-        billableHoursToday: Number(created.billableHoursToday ?? 0),
-        status: normalizeEditableTaskStatus(String(created.status ?? "backlog")),
-        position: Number(created.position ?? 0),
+        ...mapEditableTask(created, normalizedLifecycle.week),
         attachments: [],
         billableEntries: [],
     } satisfies EditableTaskRecord;
@@ -2554,10 +2599,13 @@ export async function updateEditableTask(
     taskId: string,
     data: Partial<{
         week: string;
+        plannedWeek: string;
+        closedDate: string;
         subject: string;
         description: string;
         assignee: string;
         isAi: boolean;
+        estimateHours: number;
         billableHoursToday: number;
         status: "backlog" | "open" | "closed";
         position: number;
@@ -2570,18 +2618,32 @@ export async function updateEditableTask(
         select: {
             id: true,
             week: true,
+            scopeType: true,
+            scopeId: true,
             sourceTaskId: true,
         },
     });
+    if (!currentTask) return;
+
+    const normalizedLifecycle = normalizeEditableTaskLifecycle({
+        week: typeof data.week === "string" ? data.week : String(currentTask.week),
+        plannedWeek: typeof data.plannedWeek === "string" ? data.plannedWeek : undefined,
+        closedDate: typeof data.closedDate === "string" ? data.closedDate : undefined,
+        status: typeof data.status === "string" ? data.status : undefined,
+        estimateHours: typeof data.estimateHours === "number" ? data.estimateHours : undefined,
+    });
 
     const updateData: Record<string, unknown> = {};
-    if (typeof data.week === "string") updateData.week = data.week;
+    if (typeof data.week === "string") updateData.week = normalizedLifecycle.week;
+    if (typeof data.plannedWeek === "string") updateData.plannedWeek = normalizedLifecycle.plannedWeek || null;
+    if (typeof data.closedDate === "string") updateData.closedDate = normalizedLifecycle.closedDate || null;
     if (typeof data.subject === "string") updateData.subject = data.subject;
     if (typeof data.description === "string") updateData.description = data.description;
     if (typeof data.assignee === "string") updateData.assignee = data.assignee;
     if (typeof data.isAi === "boolean") updateData.isAi = data.isAi;
+    if (typeof data.estimateHours === "number" && Number.isFinite(data.estimateHours)) updateData.estimateHours = normalizedLifecycle.estimateHours;
     if (typeof data.billableHoursToday === "number" && Number.isFinite(data.billableHoursToday)) updateData.billableHoursToday = data.billableHoursToday;
-    if (typeof data.status === "string") updateData.status = normalizeEditableTaskStatus(data.status);
+    if (typeof data.status === "string") updateData.status = normalizedLifecycle.status;
     if (typeof data.position === "number" && Number.isFinite(data.position)) updateData.position = data.position;
 
     await editableTaskModel.update({
@@ -2592,7 +2654,8 @@ export async function updateEditableTask(
     if (currentTask?.sourceTaskId && typeof updateData.status === "string") {
         await editableTaskModel.updateMany({
             where: {
-                week: String(currentTask.week),
+                scopeType: String(currentTask.scopeType),
+                scopeId: String(currentTask.scopeId),
                 sourceTaskId: String(currentTask.sourceTaskId),
                 id: {
                     not: String(taskId),
@@ -2600,6 +2663,12 @@ export async function updateEditableTask(
             },
             data: {
                 status: updateData.status,
+                ...(Object.prototype.hasOwnProperty.call(updateData, "closedDate")
+                    ? { closedDate: updateData.closedDate }
+                    : {}),
+                ...(Object.prototype.hasOwnProperty.call(updateData, "plannedWeek")
+                    ? { plannedWeek: updateData.plannedWeek }
+                    : {}),
             },
         });
     }
@@ -2818,6 +2887,70 @@ export async function getEditableTaskBillableRollups(week: string): Promise<Edit
             current.hours += hours;
             return;
         }
+        rollups.set(key, {
+            scopeType,
+            scopeId,
+            assignee,
+            hours,
+            sourceTaskId,
+        });
+    });
+
+    return Array.from(rollups.values()).map((row) => ({
+        ...row,
+        hours: Number(row.hours.toFixed(2)),
+    }));
+}
+
+export async function getEditableTaskPlannedRollups(week: string): Promise<EditableTaskPlannedRollupRecord[]> {
+    const editableTaskModel = (prisma as any).editableTask;
+    if (!editableTaskModel) return [];
+
+    const targetWeek = normalizeWeekKey(week);
+    const rows = await editableTaskModel.findMany({
+        where: {
+            week: {
+                lte: targetWeek,
+            },
+            OR: [
+                { closedDate: null },
+                { closedDate: { gte: targetWeek } },
+            ],
+        },
+        select: {
+            week: true,
+            scopeType: true,
+            scopeId: true,
+            assignee: true,
+            sourceTaskId: true,
+            status: true,
+            plannedWeek: true,
+            closedDate: true,
+            estimateHours: true,
+        },
+    });
+
+    const rollups = new Map<string, EditableTaskPlannedRollupRecord>();
+    rows.forEach((row: any) => {
+        const assignee = String(row?.assignee ?? "").trim();
+        if (!assignee) return;
+
+        const effectiveStatus = getEffectiveEditableTaskStatus(row, targetWeek);
+        if (effectiveStatus !== "open") return;
+
+        const hours = Number(row?.estimateHours ?? 0);
+        if (!Number.isFinite(hours) || hours <= 0) return;
+
+        const scopeType = String(row?.scopeType ?? "");
+        const scopeId = String(row?.scopeId ?? "");
+        const sourceTaskId = String(row?.sourceTaskId ?? "").trim() || null;
+        const key = `${scopeType}|${scopeId}|${normalizeName(assignee)}|${sourceTaskId ?? ""}`;
+        const current = rollups.get(key);
+        if (current) {
+            current.hours += hours;
+            return;
+        }
+
         rollups.set(key, {
             scopeType,
             scopeId,

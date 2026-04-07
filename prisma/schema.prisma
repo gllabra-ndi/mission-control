@@ -113,6 +113,8 @@ model CapacityGridConfig {
 model EditableTask {
   id           String   @id @default(cuid())
   week         String
+  plannedWeek  String?
+  closedDate   String?
   scopeType    String
   scopeId      String
   sourceTaskId String?
@@ -120,6 +122,7 @@ model EditableTask {
   description  String   @default("")
   assignee     String   @default("")
   isAi         Boolean  @default(false)
+  estimateHours Float   @default(0)
   billableHoursToday Float @default(0)
   status       String   @default("backlog")
   position     Float    @default(0)
@@ -130,6 +133,11 @@ model EditableTask {
 
   @@unique([week, scopeType, scopeId, sourceTaskId])
   @@index([week, scopeType, scopeId, status, position])
+  @@index([scopeType, scopeId, week], map: "editable_task_scope_week_idx")
+  @@index([scopeType, scopeId, sourceTaskId], map: "editable_task_scope_source_idx")
+  @@index([plannedWeek, scopeType, scopeId, status])
+  @@index([closedDate, scopeType, scopeId, status])
+  @@index([assignee, week, plannedWeek], map: "editable_task_assignee_week_idx")
 }
 
 model TaskAttachment {
@@ -158,6 +166,7 @@ model TaskBillableEntry {
   task      EditableTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId, entryDate])
+  @@index([entryDate, taskId], map: "task_billable_entry_date_task_idx")
 }
 
 model TaskSidebarFolder {

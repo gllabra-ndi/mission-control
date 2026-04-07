@@ -3,172 +3,115 @@
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { addDays, addWeeks, format, startOfWeek, subWeeks } from "date-fns";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Sparkles, X } from "lucide-react";
 import {
     addEditableTaskBillableEntry,
     CapacityGridPayload,
+    ClientDirectoryRecord,
+    deleteEditableTaskBillableEntry,
     EditableTaskBillableEntryRecord,
     EditableTaskRecord,
     EditableTaskSeed,
     getEditableTasks,
+    updateEditableTaskBillableEntry,
 } from "@/app/actions";
 import { ClickUpTask } from "@/lib/clickup";
+import { buildEditableTaskSeedFromClickUp, isEditableTaskVisibleInWeek } from "@/lib/editableTaskLifecycle";
 import { cn } from "@/lib/utils";
+import type { FolderWithLists } from "@/components/Sidebar";
 
 interface TimesheetsProps {
     activeWeekStr: string;
     tasks: ClickUpTask[];
     consultants: Array<{ id: number; name: string }>;
     capacityGrid: CapacityGridPayload;
+    folders?: FolderWithLists[];
+    clientDirectory?: ClientDirectoryRecord[];
     initialAssigneeFilter?: string | null;
     onNavigateWeek?: (nextWeek: string) => void;
     onAssigneeFilterChange?: (assignee: string | null) => void;
+    weekDataVersion?: number;
+    onWeekDataRefresh?: () => Promise<void> | void;
     isWeekLoading?: boolean;
 }
 
-type BillableEntryDraft = {
-    entryDate: string;
+type TimesheetTaskRow = {
+    task: EditableTaskRecord;
+    clientId: string;
+    clientLabel: string;
+    dayEntriesByDate: Record<string, EditableTaskBillableEntryRecord[]>;
+    dayHoursByDate: Record<string, number>;
+    dayPrimaryEntryByDate: Record<string, EditableTaskBillableEntryRecord | null>;
+    totalActuals: number;
+};
+
+type TimesheetCellDraft = {
     hours: string;
     note: string;
     isValueAdd: boolean;
 };
 
-type TimesheetTaskRow = {
-    task: EditableTaskRecord;
+type TimesheetCellNoteEditorState = {
+    taskId: string;
+    dateKey: string;
+    taskSubject: string;
+    dateLabel: string;
+    note: string;
+    isValueAdd: boolean;
+};
+
+type ClientGroup = {
+    clientId: string;
     clientLabel: string;
     plannedHours: number;
-    billedHours: number;
+    actualsHours: number;
     remainingHours: number;
-    entries: EditableTaskBillableEntryRecord[];
+    actualsByDate: Record<string, number>;
+    tasks: TimesheetTaskRow[];
 };
 
 function normalizeName(value: string) {
     return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function toValidDate(rawValue: string | number | null | undefined): Date | null {
-    const raw = Number(rawValue ?? 0);
-    if (!Number.isFinite(raw) || raw <= 0) return null;
-    const parsed = new Date(raw);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function toWeekStartStr(date: Date): string {
-    return format(startOfWeek(date, { weekStartsOn: 1 }), "yyyy-MM-dd");
-}
-
-function getTaskWeekStr(task: ClickUpTask, activeWeekStr: string): string {
-    const activeWeekDate = new Date(`${activeWeekStr}T00:00:00`);
-    const activeWeekEnd = addDays(activeWeekDate, 6);
-    const startDate = toValidDate(task?.start_date);
-    const dueDate = toValidDate(task?.due_date);
-    const closedDate = toValidDate(task?.date_closed);
-    const createdDate = toValidDate(task?.date_created);
-
-    if (startDate && dueDate) {
-        const rangeStart = startDate <= dueDate ? startDate : dueDate;
-        const rangeEnd = startDate <= dueDate ? dueDate : startDate;
-        if (rangeStart <= activeWeekEnd && rangeEnd >= activeWeekDate) {
-            return activeWeekStr;
-        }
-    }
-
-    if (startDate && toWeekStartStr(startDate) === activeWeekStr) return activeWeekStr;
-    if (dueDate && toWeekStartStr(dueDate) === activeWeekStr) return activeWeekStr;
-    if (closedDate && toWeekStartStr(closedDate) === activeWeekStr) return activeWeekStr;
-
-    if (startDate) return toWeekStartStr(startDate);
-    if (dueDate) return toWeekStartStr(dueDate);
-    if (closedDate) return toWeekStartStr(closedDate);
-    if (createdDate) return toWeekStartStr(createdDate);
-    return "";
-}
-
-function normalizeEditableStatusFromClickUp(task: ClickUpTask): "backlog" | "open" | "closed" {
-    const statusText = String(task?.status?.status ?? "").toLowerCase();
-    const statusType = String(task?.status?.type ?? "").toLowerCase();
-    if (statusType === "closed" || /(complete|completed|done|closed|resolved|shipped)/.test(statusText)) return "closed";
-    if (/(backlog|not started|todo|to do|new|queued|queue|planned|plan|pending)/.test(statusText)) return "backlog";
-    return "open";
+function formatInputHours(value: number) {
+    if (!Number.isFinite(value) || Math.abs(value) < 0.001) return "";
+    return String(Number(value.toFixed(2)));
 }
 
 function buildSeedTasks(tasks: ClickUpTask[], activeWeekStr: string): EditableTaskSeed[] {
     return tasks
-        .map((task) => ({
-            sourceTaskId: String(task.id),
-            subject: String(task.name ?? "Untitled Task"),
-            description: "",
-            assignee: Array.isArray(task.assignees) && task.assignees.length > 0
-                ? String(task.assignees[0]?.username ?? "")
-                : "",
-            week: getTaskWeekStr(task, activeWeekStr) || activeWeekStr,
-            status: normalizeEditableStatusFromClickUp(task),
-        }))
-        .filter((task) => task.week === activeWeekStr);
+        .map((task) => buildEditableTaskSeedFromClickUp(task, activeWeekStr))
+        .filter((task) => isEditableTaskVisibleInWeek(task, activeWeekStr));
 }
 
-function getTaskClientLabel(task: ClickUpTask | null) {
-    const listName = String(task?.list?.name ?? "").trim();
-    const projectName = String(task?.project?.name ?? "").trim();
-    const folderName = String(task?.folder?.name ?? "").trim();
-    return listName || projectName || folderName || "Unassigned Client";
-}
-
-function resolveCapacityClientLabel(task: ClickUpTask | null, clientLabels: string[]) {
-    const candidates = [
+function getTaskScopeCandidates(task: ClickUpTask | null) {
+    return [
+        String(task?.list?.id ?? "").trim(),
         String(task?.list?.name ?? "").trim(),
         String(task?.project?.name ?? "").trim(),
         String(task?.folder?.name ?? "").trim(),
     ].filter(Boolean);
-
-    if (candidates.length === 0) return "Unassigned Client";
-
-    const normalizedClientLabels = clientLabels.map((label) => ({
-        label,
-        normalized: normalizeName(label),
-    }));
-
-    for (const candidate of candidates) {
-        const normalizedCandidate = normalizeName(candidate);
-        if (!normalizedCandidate) continue;
-
-        const exact = normalizedClientLabels.find((entry) => entry.normalized === normalizedCandidate);
-        if (exact) return exact.label;
-
-        const substringMatches = normalizedClientLabels
-            .filter((entry) => entry.normalized && normalizedCandidate.includes(entry.normalized))
-            .sort((a, b) => b.normalized.length - a.normalized.length);
-        if (substringMatches[0]) return substringMatches[0].label;
-
-        const reverseSubstringMatches = normalizedClientLabels
-            .filter((entry) => entry.normalized && entry.normalized.includes(normalizedCandidate))
-            .sort((a, b) => b.normalized.length - a.normalized.length);
-        if (reverseSubstringMatches[0]) return reverseSubstringMatches[0].label;
-    }
-
-    return candidates[0];
 }
 
-function getDefaultBillableEntryDate(activeWeekStr: string): string {
+function getDayHours(entries: EditableTaskBillableEntryRecord[]) {
+    return entries.reduce((sum, entry) => sum + Number(entry.hours ?? 0), 0);
+}
+
+function getPrimaryDayEntry(entries: EditableTaskBillableEntryRecord[]) {
+    return entries[0] ?? null;
+}
+
+function buildWeekdays(activeWeekStr: string) {
     const start = new Date(`${activeWeekStr}T00:00:00`);
-    const end = addDays(start, 4);
-    const today = new Date();
-    const todayKey = format(today, "yyyy-MM-dd");
-    if (today >= start && today <= end) return todayKey;
-    return activeWeekStr;
-}
-
-function getTaskWeeklyBillableHours(task: EditableTaskRecord): number {
-    return (task.billableEntries || []).reduce((sum, entry) => sum + Number(entry.hours ?? 0), 0);
-}
-
-function buildDefaultDraft(activeWeekStr: string): BillableEntryDraft {
-    return {
-        entryDate: getDefaultBillableEntryDate(activeWeekStr),
-        hours: "",
-        note: "",
-        isValueAdd: false,
-    };
+    return Array.from({ length: 5 }, (_, index) => {
+        const date = addDays(start, index);
+        return {
+            key: format(date, "yyyy-MM-dd"),
+            shortLabel: format(date, "EEE"),
+            dateLabel: format(date, "MMM d"),
+        };
+    });
 }
 
 export function Timesheets({
@@ -176,29 +119,38 @@ export function Timesheets({
     tasks,
     consultants,
     capacityGrid,
+    folders = [],
+    clientDirectory = [],
     initialAssigneeFilter = null,
     onNavigateWeek,
     onAssigneeFilterChange,
+    weekDataVersion = 0,
+    onWeekDataRefresh,
     isWeekLoading = false,
 }: TimesheetsProps) {
     const router = useRouter();
     const [editableTasks, setEditableTasks] = useState<EditableTaskRecord[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [selectedConsultant, setSelectedConsultant] = useState<string>(initialAssigneeFilter || consultants[0]?.name || "");
-    const [entryDrafts, setEntryDrafts] = useState<Record<string, BillableEntryDraft>>({});
+    const [cellDrafts, setCellDrafts] = useState<Record<string, Record<string, TimesheetCellDraft>>>({});
+    const [noteEditor, setNoteEditor] = useState<TimesheetCellNoteEditorState | null>(null);
+    const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
 
     const activeWeekDate = useMemo(() => new Date(`${activeWeekStr}T00:00:00`), [activeWeekStr]);
     const weekLabel = `${format(activeWeekDate, "MM/dd")} to ${format(addDays(activeWeekDate, 4), "MM/dd")}`;
     const weekRangeLabel = `${format(activeWeekDate, "MMM d")} to ${format(addDays(activeWeekDate, 4), "MMM d")}`;
     const weekNumber = format(activeWeekDate, "II");
+    const weekdays = useMemo(() => buildWeekdays(activeWeekStr), [activeWeekStr]);
 
     const consultantOptions = useMemo(
-        () => consultants
-            .map((consultant) => String(consultant.name || "").trim())
-            .filter(Boolean)
-            .sort((a, b) => a.localeCompare(b)),
-        [consultants]
+        () => Array.from(new Set(
+            [
+                ...consultants.map((consultant) => String(consultant.name || "").trim()),
+                ...editableTasks.map((task) => String(task.assignee || "").trim()),
+            ].filter(Boolean)
+        )).sort((a, b) => a.localeCompare(b)),
+        [consultants, editableTasks]
     );
 
     useEffect(() => {
@@ -232,7 +184,7 @@ export function Timesheets({
         return () => {
             cancelled = true;
         };
-    }, [activeWeekStr, seedTasks]);
+    }, [activeWeekStr, seedTasks, weekDataVersion]);
 
     const sourceTaskById = useMemo(() => {
         const byId = new Map<string, ClickUpTask>();
@@ -244,158 +196,368 @@ export function Timesheets({
         return byId;
     }, [tasks]);
 
+    const clientDirectoryLookup = useMemo(() => {
+        const byId = new Map<string, ClientDirectoryRecord>();
+        const byName = new Map<string, ClientDirectoryRecord>();
+        clientDirectory.forEach((client) => {
+            const id = String(client?.id ?? "").trim();
+            const name = String(client?.name ?? "").trim();
+            if (id) byId.set(id, client);
+            if (name) byName.set(normalizeName(name), client);
+        });
+        return { byId, byName };
+    }, [clientDirectory]);
+
+    const boardClientByScope = useMemo(() => {
+        const byListId = new Map<string, { clientId: string; clientName: string }>();
+        const byListName = new Map<string, { clientId: string; clientName: string }>();
+        folders.forEach((folder) => {
+            folder.lists.forEach((list) => {
+                const clientId = String(list.clientId ?? "").trim();
+                const clientName = String(list.clientName ?? "").trim() || String(list.name ?? "").trim();
+                const listId = String(list.id ?? "").trim();
+                const listName = String(list.name ?? "").trim();
+                if (clientId && listId) byListId.set(listId, { clientId, clientName });
+                if (clientName && listName) byListName.set(normalizeName(listName), { clientId: clientId || clientName, clientName });
+            });
+        });
+        return { byListId, byListName };
+    }, [folders]);
+
     const visibleTasks = useMemo(() => {
         const selectedKey = normalizeName(selectedConsultant);
         return editableTasks
             .filter((task) => normalizeName(task.assignee) === selectedKey)
             .filter((task) => task.status === "open")
-            .sort((a, b) => {
-                const taskA = a.sourceTaskId ? sourceTaskById.get(String(a.sourceTaskId)) : null;
-                const taskB = b.sourceTaskId ? sourceTaskById.get(String(b.sourceTaskId)) : null;
-                const clientCompare = getTaskClientLabel(taskA ?? null).localeCompare(getTaskClientLabel(taskB ?? null));
-                if (clientCompare !== 0) return clientCompare;
-                return a.subject.localeCompare(b.subject);
-            });
-    }, [editableTasks, selectedConsultant, sourceTaskById]);
+            .sort((a, b) => a.subject.localeCompare(b.subject));
+    }, [editableTasks, selectedConsultant]);
 
-    const capacityClientLabels = useMemo(
-        () => (Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [])
-            .map((row) => String(row?.client ?? "").trim())
-            .filter(Boolean),
+    const capacityRows = useMemo(
+        () => Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [],
         [capacityGrid]
     );
 
     const plannedHoursByClient = useMemo(() => {
         const selectedKey = normalizeName(selectedConsultant);
         const resources = Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [];
-        const rows = Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [];
         const matchedResource = resources.find((resource) => normalizeName(String(resource?.name ?? "")) === selectedKey);
         if (!matchedResource) return new Map<string, number>();
 
         const nextMap = new Map<string, number>();
-        rows.forEach((row) => {
+        capacityRows.forEach((row) => {
+            const clientId = String(row?.id ?? "").trim();
             const clientLabel = String(row?.client ?? "").trim();
-            if (!clientLabel) return;
             const hours = Number(row?.allocations?.[matchedResource.id]?.hours ?? 0);
             if (hours <= 0) return;
-            nextMap.set(clientLabel, Number(((nextMap.get(clientLabel) ?? 0) + hours).toFixed(1)));
+            if (clientId) nextMap.set(clientId, Number(((nextMap.get(clientId) ?? 0) + hours).toFixed(1)));
+            if (clientLabel) {
+                const fallbackKey = `name:${normalizeName(clientLabel)}`;
+                nextMap.set(fallbackKey, Number(((nextMap.get(fallbackKey) ?? 0) + hours).toFixed(1)));
+            }
         });
         return nextMap;
-    }, [capacityGrid, selectedConsultant]);
+    }, [capacityGrid, capacityRows, selectedConsultant]);
+
+    const resolveClientMeta = useMemo(() => {
+        return (task: ClickUpTask | null) => {
+            const listId = String(task?.list?.id ?? "").trim();
+            const directBoardMatch = listId ? boardClientByScope.byListId.get(listId) : null;
+            if (directBoardMatch) {
+                const canonicalClient = clientDirectoryLookup.byId.get(directBoardMatch.clientId);
+                return {
+                    clientId: directBoardMatch.clientId,
+                    clientLabel: canonicalClient?.name || directBoardMatch.clientName,
+                };
+            }
+
+            const candidates = getTaskScopeCandidates(task);
+            for (const candidate of candidates) {
+                const normalized = normalizeName(candidate);
+                const boardMatch = boardClientByScope.byListName.get(normalized);
+                if (boardMatch) {
+                    const canonicalClient = clientDirectoryLookup.byId.get(boardMatch.clientId);
+                    return {
+                        clientId: boardMatch.clientId,
+                        clientLabel: canonicalClient?.name || boardMatch.clientName,
+                    };
+                }
+                const directoryMatch = clientDirectoryLookup.byName.get(normalized);
+                if (directoryMatch) {
+                    return {
+                        clientId: directoryMatch.id,
+                        clientLabel: directoryMatch.name,
+                    };
+                }
+            }
+
+            const firstLabel = candidates[1] || candidates[2] || candidates[3] || "Unassigned Client";
+            return {
+                clientId: `name:${normalizeName(firstLabel) || "unassigned-client"}`,
+                clientLabel: firstLabel,
+            };
+        };
+    }, [boardClientByScope.byListId, boardClientByScope.byListName, clientDirectoryLookup.byId, clientDirectoryLookup.byName]);
 
     const taskRows = useMemo<TimesheetTaskRow[]>(() => {
-        return visibleTasks.map((task) => {
-            const sourceTask = task.sourceTaskId ? sourceTaskById.get(String(task.sourceTaskId)) : null;
-            const clientLabel = resolveCapacityClientLabel(sourceTask ?? null, capacityClientLabels);
-            const plannedHours = Number(plannedHoursByClient.get(clientLabel) ?? 0);
-            const billedHours = Number(getTaskWeeklyBillableHours(task).toFixed(1));
-            const entries = [...(task.billableEntries || [])].sort((a, b) => {
-                if (a.entryDate !== b.entryDate) return b.entryDate.localeCompare(a.entryDate);
-                return b.createdAt.localeCompare(a.createdAt);
-            });
+        return visibleTasks
+            .map((task) => {
+                const sourceTask = task.sourceTaskId ? sourceTaskById.get(String(task.sourceTaskId)) ?? null : null;
+                const clientMeta = resolveClientMeta(sourceTask);
+                const dayEntriesByDate = weekdays.reduce<Record<string, EditableTaskBillableEntryRecord[]>>((acc, weekday) => {
+                    acc[weekday.key] = (task.billableEntries || [])
+                        .filter((entry) => entry.entryDate === weekday.key)
+                        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+                    return acc;
+                }, {});
+                const dayHoursByDate = weekdays.reduce<Record<string, number>>((acc, weekday) => {
+                    acc[weekday.key] = Number(getDayHours(dayEntriesByDate[weekday.key] || []).toFixed(2));
+                    return acc;
+                }, {});
+                const dayPrimaryEntryByDate = weekdays.reduce<Record<string, EditableTaskBillableEntryRecord | null>>((acc, weekday) => {
+                    acc[weekday.key] = getPrimaryDayEntry(dayEntriesByDate[weekday.key] || []);
+                    return acc;
+                }, {});
+                const totalActuals = weekdays.reduce((sum, weekday) => sum + Number(dayHoursByDate[weekday.key] ?? 0), 0);
 
-            return {
-                task,
-                clientLabel,
-                plannedHours: Number(plannedHours.toFixed(1)),
-                billedHours,
-                remainingHours: 0,
-                entries,
-            };
-        });
-    }, [capacityClientLabels, plannedHoursByClient, sourceTaskById, visibleTasks]);
+                return {
+                    task,
+                    clientId: clientMeta.clientId,
+                    clientLabel: clientMeta.clientLabel,
+                    dayEntriesByDate,
+                    dayHoursByDate,
+                    dayPrimaryEntryByDate,
+                    totalActuals: Number(totalActuals.toFixed(2)),
+                };
+            })
+            .sort((a, b) => {
+                const clientCompare = a.clientLabel.localeCompare(b.clientLabel);
+                if (clientCompare !== 0) return clientCompare;
+                return a.task.subject.localeCompare(b.task.subject);
+            });
+    }, [resolveClientMeta, sourceTaskById, visibleTasks, weekdays]);
 
     useEffect(() => {
-        setEntryDrafts((current) => {
-            const nextDrafts: Record<string, BillableEntryDraft> = {};
+        setCellDrafts((current) => {
+            const next: Record<string, Record<string, TimesheetCellDraft>> = {};
             taskRows.forEach((row) => {
-                nextDrafts[row.task.id] = current[row.task.id] ?? buildDefaultDraft(activeWeekStr);
+                next[row.task.id] = weekdays.reduce<Record<string, TimesheetCellDraft>>((draft, weekday) => {
+                    const primaryEntry = row.dayPrimaryEntryByDate[weekday.key];
+                    const currentDraft = current[row.task.id]?.[weekday.key];
+                    draft[weekday.key] = currentDraft ?? {
+                        hours: formatInputHours(row.dayHoursByDate[weekday.key] ?? 0),
+                        note: String(primaryEntry?.note ?? ""),
+                        isValueAdd: Boolean(primaryEntry?.isValueAdd ?? false),
+                    };
+                    return draft;
+                }, {});
             });
-            return nextDrafts;
+            return next;
         });
-    }, [activeWeekStr, taskRows]);
+    }, [taskRows, weekdays]);
 
-    const clientGroups = useMemo(() => {
-        const groups = new Map<string, {
-            clientLabel: string;
-            plannedHours: number;
-            billedHours: number;
-            remainingHours: number;
-            tasks: TimesheetTaskRow[];
-        }>();
+    const clientGroups = useMemo<ClientGroup[]>(() => {
+        const groups = new Map<string, ClientGroup>();
 
         taskRows.forEach((row) => {
-            const existing = groups.get(row.clientLabel) ?? {
+            const plannedHours = Number(
+                plannedHoursByClient.get(row.clientId)
+                ?? plannedHoursByClient.get(`name:${normalizeName(row.clientLabel)}`)
+                ?? 0
+            );
+            const existing = groups.get(row.clientId) ?? {
+                clientId: row.clientId,
                 clientLabel: row.clientLabel,
-                plannedHours: Number(plannedHoursByClient.get(row.clientLabel) ?? 0),
-                billedHours: 0,
+                plannedHours,
+                actualsHours: 0,
                 remainingHours: 0,
+                actualsByDate: weekdays.reduce<Record<string, number>>((acc, weekday) => {
+                    acc[weekday.key] = 0;
+                    return acc;
+                }, {}),
                 tasks: [],
             };
-            existing.billedHours += row.billedHours;
+
+            existing.actualsHours += row.totalActuals;
+            weekdays.forEach((weekday) => {
+                existing.actualsByDate[weekday.key] = Number(
+                    (existing.actualsByDate[weekday.key] + Number(row.dayHoursByDate[weekday.key] ?? 0)).toFixed(2)
+                );
+            });
             existing.tasks.push(row);
-            groups.set(row.clientLabel, existing);
+            groups.set(row.clientId, existing);
         });
 
         return Array.from(groups.values())
             .map((group) => ({
                 ...group,
-                remainingHours: Number(Math.max(0, group.plannedHours - group.billedHours).toFixed(1)),
+                actualsHours: Number(group.actualsHours.toFixed(2)),
+                remainingHours: Number(Math.max(0, group.plannedHours - group.actualsHours).toFixed(2)),
+                tasks: group.tasks.sort((a, b) => a.task.subject.localeCompare(b.task.subject)),
             }))
             .sort((a, b) => a.clientLabel.localeCompare(b.clientLabel));
-    }, [plannedHoursByClient, taskRows]);
+    }, [plannedHoursByClient, taskRows, weekdays]);
 
     const overallSummary = useMemo(() => {
-        const plannedHours = Array.from(plannedHoursByClient.values()).reduce((sum, hours) => sum + Number(hours ?? 0), 0);
-        const billedHours = clientGroups.reduce((sum, group) => sum + group.billedHours, 0);
+        const plannedHours = clientGroups.reduce((sum, group) => sum + Number(group.plannedHours ?? 0), 0);
+        const actualsHours = clientGroups.reduce((sum, group) => sum + Number(group.actualsHours ?? 0), 0);
         return {
             plannedHours: Number(plannedHours.toFixed(1)),
-            billedHours: Number(billedHours.toFixed(1)),
-            remainingHours: Number(Math.max(0, plannedHours - billedHours).toFixed(1)),
+            actualsHours: Number(actualsHours.toFixed(1)),
+            remainingHours: Number(Math.max(0, plannedHours - actualsHours).toFixed(1)),
         };
-    }, [clientGroups, plannedHoursByClient]);
+    }, [clientGroups]);
 
-    const handleDraftChange = (taskId: string, data: Partial<BillableEntryDraft>) => {
-        setEntryDrafts((prev) => ({
+    const handleCellChange = (taskId: string, dateKey: string, value: string) => {
+        const cleaned = value.replace(/[^0-9.]/g, "");
+        setCellDrafts((prev) => ({
             ...prev,
             [taskId]: {
-                ...(prev[taskId] ?? buildDefaultDraft(activeWeekStr)),
-                ...data,
+                ...(prev[taskId] ?? {}),
+                [dateKey]: {
+                    ...(prev[taskId]?.[dateKey] ?? { note: "", isValueAdd: false }),
+                    hours: cleaned,
+                },
             },
         }));
     };
 
-    const handleSubmitEntry = (row: TimesheetTaskRow) => {
-        const draft = entryDrafts[row.task.id] ?? buildDefaultDraft(activeWeekStr);
-        const nextHours = Number(draft.hours || 0);
-        if (!draft.entryDate || nextHours <= 0) return;
+    const getSuggestedHours = (group: ClientGroup, dateKey: string) => {
+        const currentDayHours = Number(group.actualsByDate[dateKey] ?? 0);
+        if (currentDayHours > 0) return Number(currentDayHours.toFixed(1));
 
+        const populatedDayValues = weekdays
+            .map((weekday) => Number(group.actualsByDate[weekday.key] ?? 0))
+            .filter((hours) => hours > 0.05);
+        const emptyDayCount = weekdays.filter((weekday) => Number(group.actualsByDate[weekday.key] ?? 0) <= 0.05).length;
+        if (group.remainingHours <= 0.05) return 0;
+
+        if (populatedDayValues.length > 0) {
+            const average = populatedDayValues.reduce((sum, hours) => sum + hours, 0) / populatedDayValues.length;
+            const evenSpread = group.remainingHours / Math.max(1, emptyDayCount);
+            return Number(Math.min(group.remainingHours, average, evenSpread).toFixed(1));
+        }
+
+        return Number((group.remainingHours / Math.max(1, emptyDayCount)).toFixed(1));
+    };
+
+    const applySuggestedHours = (taskId: string, dateKey: string, suggestedHours: number) => {
+        if (suggestedHours <= 0) return;
+        setCellDrafts((prev) => ({
+            ...prev,
+            [taskId]: {
+                ...(prev[taskId] ?? {}),
+                [dateKey]: {
+                    ...(prev[taskId]?.[dateKey] ?? { note: "", isValueAdd: false }),
+                    hours: formatInputHours(suggestedHours),
+                },
+            },
+        }));
+    };
+
+    const openNoteEditor = (row: TimesheetTaskRow, dateKey: string) => {
+        const weekday = weekdays.find((day) => day.key === dateKey);
+        const draft = cellDrafts[row.task.id]?.[dateKey];
+        setNoteEditor({
+            taskId: row.task.id,
+            dateKey,
+            taskSubject: row.task.subject,
+            dateLabel: weekday ? `${weekday.shortLabel} ${weekday.dateLabel}` : dateKey,
+            note: String(draft?.note ?? ""),
+            isValueAdd: Boolean(draft?.isValueAdd ?? false),
+        });
+    };
+
+    const saveNoteEditor = () => {
+        if (!noteEditor) return;
+        setCellDrafts((prev) => ({
+            ...prev,
+            [noteEditor.taskId]: {
+                ...(prev[noteEditor.taskId] ?? {}),
+                [noteEditor.dateKey]: {
+                    ...(prev[noteEditor.taskId]?.[noteEditor.dateKey] ?? { hours: "" }),
+                    note: noteEditor.note,
+                    isValueAdd: noteEditor.isValueAdd,
+                },
+            },
+        }));
+        setNoteEditor(null);
+    };
+
+    const taskHasChanges = (row: TimesheetTaskRow) => {
+        return weekdays.some((weekday) => {
+            const draft = cellDrafts[row.task.id]?.[weekday.key];
+            const draftValue = Number(draft?.hours || 0);
+            const currentValue = Number(row.dayHoursByDate[weekday.key] ?? 0);
+            const currentEntry = row.dayPrimaryEntryByDate[weekday.key];
+            const currentNote = String(currentEntry?.note ?? "");
+            const currentIsValueAdd = Boolean(currentEntry?.isValueAdd ?? false);
+            return (
+                Math.abs(draftValue - currentValue) > 0.01
+                || String(draft?.note ?? "") !== currentNote
+                || Boolean(draft?.isValueAdd ?? false) !== currentIsValueAdd
+            );
+        });
+    };
+
+    const refreshEditableTasks = async () => {
+        const rows = await getEditableTasks(activeWeekStr, "all", "all", seedTasks);
+        setEditableTasks(rows);
+        await onWeekDataRefresh?.();
+    };
+
+    const handleSaveRow = (row: TimesheetTaskRow) => {
         startTransition(async () => {
-            const created = await addEditableTaskBillableEntry({
-                taskId: row.task.id,
-                entryDate: draft.entryDate,
-                hours: nextHours,
-                note: draft.note,
-                isValueAdd: draft.isValueAdd,
-            });
-            if (!created) return;
+            setSavingTaskId(row.task.id);
+            try {
+                for (const weekday of weekdays) {
+                    const draft = cellDrafts[row.task.id]?.[weekday.key];
+                    const draftValue = Number(draft?.hours || 0);
+                    const targetHours = Number.isFinite(draftValue) ? Number(draftValue.toFixed(2)) : 0;
+                    const currentEntries = row.dayEntriesByDate[weekday.key] || [];
+                    const currentTotal = Number(getDayHours(currentEntries).toFixed(2));
+                    const primaryEntry = row.dayPrimaryEntryByDate[weekday.key];
+                    const note = String(draft?.note ?? "");
+                    const isValueAdd = Boolean(draft?.isValueAdd ?? false);
+                    const noteChanged = note !== String(primaryEntry?.note ?? "");
+                    const valueAddChanged = isValueAdd !== Boolean(primaryEntry?.isValueAdd ?? false);
+                    const hoursChanged = Math.abs(targetHours - currentTotal) > 0.01;
+                    if (!hoursChanged && !noteChanged && !valueAddChanged) continue;
 
-            setEditableTasks((prev) => prev.map((task) => {
-                if (task.id !== row.task.id) return task;
-                const nextEntries = [created, ...(task.billableEntries || [])].sort((a, b) => {
-                    if (a.entryDate !== b.entryDate) return b.entryDate.localeCompare(a.entryDate);
-                    return b.createdAt.localeCompare(a.createdAt);
-                });
-                return {
-                    ...task,
-                    billableEntries: nextEntries,
-                };
-            }));
+                    if (targetHours <= 0.01) {
+                        for (const entry of currentEntries) {
+                            await deleteEditableTaskBillableEntry(entry.id);
+                        }
+                        continue;
+                    }
 
-            setEntryDrafts((prev) => ({
-                ...prev,
-                [row.task.id]: buildDefaultDraft(activeWeekStr),
-            }));
+                    if (currentEntries.length === 0) {
+                        await addEditableTaskBillableEntry({
+                            taskId: row.task.id,
+                            entryDate: weekday.key,
+                            hours: targetHours,
+                            note,
+                            isValueAdd,
+                        });
+                        continue;
+                    }
+
+                    const [primary, ...duplicates] = currentEntries;
+                    if (primary) {
+                        await updateEditableTaskBillableEntry(primary.id, {
+                            hours: targetHours,
+                            note,
+                            isValueAdd,
+                        });
+                    }
+                    for (const entry of duplicates) {
+                        await deleteEditableTaskBillableEntry(entry.id);
+                    }
+                }
+
+                await refreshEditableTasks();
+            } finally {
+                setSavingTaskId(null);
+            }
         });
     };
 
@@ -418,6 +580,7 @@ export function Timesheets({
                                 }
                             }}
                             disabled={!onNavigateWeek && isWeekLoading}
+                            aria-label="Previous week"
                             className="flex h-10 w-10 items-center justify-center border-r border-border/60 text-text-muted transition-colors hover:bg-surface-hover hover:text-white disabled:opacity-50"
                         >
                             <ChevronLeft className="w-4 h-4" />
@@ -436,6 +599,7 @@ export function Timesheets({
                                 }
                             }}
                             disabled={!onNavigateWeek && isWeekLoading}
+                            aria-label="Next week"
                             className="flex h-10 w-10 items-center justify-center border-l border-border/60 text-text-muted transition-colors hover:bg-surface-hover hover:text-white disabled:opacity-50"
                         >
                             <ChevronRight className="w-4 h-4" />
@@ -476,17 +640,17 @@ export function Timesheets({
                 </div>
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
                     <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Actuals This Week</div>
-                    <div className="mt-2 text-4xl font-bold text-white">{overallSummary.billedHours.toFixed(1)}</div>
+                    <div className="mt-2 text-4xl font-bold text-white">{overallSummary.actualsHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-primary/30 bg-[linear-gradient(180deg,rgba(29,39,69,0.98)_0%,rgba(16,24,44,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining To Bill</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining Planned</div>
                     <div className="mt-2 text-5xl font-bold text-white">{overallSummary.remainingHours.toFixed(1)}</div>
-                    <div className="mt-2 text-xs text-text-muted">Across all active client work for {selectedConsultant || "this consultant"}.</div>
+                    <div className="mt-2 text-xs text-text-muted">Grouped by client, with Monday through Friday entry cells per task.</div>
                 </div>
             </div>
 
             <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-4 text-xs text-text-muted shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                This screen uses Capacity Grid planned hours as the source of truth for each consultant&apos;s client totals. It shows active tasks, billed hours so far, and remaining hours to bill by client.
+                This grid uses the Plan vs Actuals client plan as the weekly target, groups tasks under their canonical client, and suggests weekday entries from each client&apos;s current actual pattern.
             </div>
 
             {clientGroups.length === 0 && (
@@ -500,14 +664,14 @@ export function Timesheets({
             <div className="space-y-5">
                 {clientGroups.map((group) => (
                     <div
-                        key={group.clientLabel}
+                        key={group.clientId}
                         className="overflow-hidden rounded-[28px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] shadow-[0_24px_70px_rgba(0,0,0,0.28)]"
                     >
                         <div className="border-b border-border/40 px-5 py-4">
                             <div className="flex items-center justify-between gap-4 flex-wrap">
                                 <div>
                                     <div className="text-lg font-semibold text-white">{group.clientLabel}</div>
-                                    <div className="mt-1 text-xs text-text-muted">{group.tasks.length} active task{group.tasks.length === 1 ? "" : "s"}</div>
+                                    <div className="mt-1 text-xs text-text-muted">{group.tasks.length} active task{group.tasks.length === 1 ? "" : "s"} for {selectedConsultant || "this consultant"}</div>
                                 </div>
                                 <div className="flex items-center gap-3 flex-wrap">
                                     <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
@@ -516,149 +680,189 @@ export function Timesheets({
                                     </div>
                                     <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
                                         <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Actuals</div>
-                                        <div className="mt-1 text-xl font-semibold text-white">{group.billedHours.toFixed(1)}</div>
+                                        <div className="mt-1 text-xl font-semibold text-white">{group.actualsHours.toFixed(1)}</div>
                                     </div>
                                     <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-2">
-                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Remaining To Bill</div>
+                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Remaining</div>
                                         <div className="mt-1 text-2xl font-semibold text-white">{group.remainingHours.toFixed(1)}</div>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        <div className="divide-y divide-border/30">
-                            {group.tasks.map((row, index) => {
-                                const draft = entryDrafts[row.task.id] ?? buildDefaultDraft(activeWeekStr);
-                                const hoursValue = Number(draft.hours || 0);
-                                const showWarning = hoursValue > 0 && group.remainingHours > 0.01 && hoursValue > group.remainingHours + 0.01;
-
-                                return (
-                                    <div
-                                        key={row.task.id}
-                                        className={cn(
-                                            "px-5 py-5",
-                                            index % 2 === 0 ? "bg-[#0d121d]/68" : "bg-[#101622]/74"
-                                        )}
-                                    >
-                                        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.2fr)_220px_minmax(0,1.4fr)]">
-                                            <div className="space-y-3">
-                                                <div>
-                                                    <div className="text-base font-semibold text-white">{row.task.subject}</div>
-                                                    <div className="mt-1 text-xs uppercase tracking-[0.16em] text-text-muted">{row.task.status}</div>
-                                                </div>
-                                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                                                    <div className="rounded-xl border border-border/50 bg-background/25 px-3 py-3">
-                                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Planned</div>
-                                                        <div className="mt-1 text-lg font-semibold text-white">{row.plannedHours.toFixed(1)}</div>
-                                                    </div>
-                                                    <div className="rounded-xl border border-border/50 bg-background/25 px-3 py-3">
-                                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Actuals</div>
-                                                        <div className="mt-1 text-lg font-semibold text-white">{row.billedHours.toFixed(1)}</div>
-                                                    </div>
-                                                    <div className="rounded-xl border border-primary/30 bg-primary/10 px-3 py-3">
-                                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Client Remaining</div>
-                                                        <div className="mt-1 text-lg font-semibold text-white">{group.remainingHours.toFixed(1)}</div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div className="space-y-3 rounded-2xl border border-border/50 bg-background/25 px-4 py-4">
-                                                <div className="text-sm font-semibold text-white">Submit Billable Entry</div>
-                                                <label className="block space-y-1">
-                                                    <span className="text-[11px] uppercase tracking-wider text-text-muted">Date</span>
-                                                    <input
-                                                        type="date"
-                                                        value={draft.entryDate}
-                                                        onChange={(event) => handleDraftChange(row.task.id, { entryDate: event.target.value })}
-                                                        className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
-                                                    />
-                                                </label>
-                                                <label className="block space-y-1">
-                                                    <span className="text-[11px] uppercase tracking-wider text-text-muted">Hours</span>
-                                                    <input
-                                                        type="number"
-                                                        min="0"
-                                                        step="0.25"
-                                                        value={draft.hours}
-                                                        onChange={(event) => handleDraftChange(row.task.id, { hours: event.target.value })}
-                                                        placeholder={group.remainingHours > 0 ? `${group.remainingHours.toFixed(1)} remaining for client` : "0.0"}
-                                                        className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
-                                                    />
-                                                </label>
-                                                <label className="block space-y-1">
-                                                    <span className="text-[11px] uppercase tracking-wider text-text-muted">Note</span>
-                                                    <input
-                                                        type="text"
-                                                        value={draft.note}
-                                                        onChange={(event) => handleDraftChange(row.task.id, { note: event.target.value })}
-                                                        placeholder="Optional billing note"
-                                                        className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
-                                                    />
-                                                </label>
-                                                <label className="flex items-center gap-3 rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={draft.isValueAdd}
-                                                        onChange={(event) => handleDraftChange(row.task.id, { isValueAdd: event.target.checked })}
-                                                        className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                                    />
-                                                    <span>Value Add</span>
-                                                </label>
-                                                {showWarning && (
-                                                    <div className="text-xs text-amber-300">
-                                                        This entry is above the current remaining hours for this client.
-                                                    </div>
-                                                )}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleSubmitEntry(row)}
-                                                    disabled={isPending || !draft.entryDate || Number(draft.hours || 0) <= 0}
-                                                    className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-50"
-                                                >
-                                                    <Plus className="w-4 h-4" />
-                                                    Submit
-                                                </button>
-                                            </div>
-
-                                            <div className="rounded-2xl border border-border/50 bg-background/25 px-4 py-4">
-                                                <div className="flex items-center justify-between gap-3">
-                                                    <div>
-                                                        <div className="text-sm font-semibold text-white">Billable History</div>
-                                                        <div className="mt-1 text-xs text-text-muted">{row.billedHours.toFixed(1)}h logged this week</div>
-                                                    </div>
-                                                </div>
-                                                <div className="mt-3 space-y-2">
-                                                    {row.entries.length === 0 && (
-                                                        <div className="text-sm text-text-muted">No billable entries logged yet for this task.</div>
-                                                    )}
-                                                    {row.entries.map((entry) => (
-                                                        <div key={entry.id} className="rounded-xl border border-border/40 bg-background/50 px-3 py-3">
-                                                            <div className="flex items-center justify-between gap-3 flex-wrap">
-                                                                <div className="text-sm font-medium text-white">
-                                                                    {entry.hours.toFixed(2)}h on {format(new Date(`${entry.entryDate}T00:00:00`), "MMM d, yyyy")}
+                        <div className="overflow-x-auto">
+                            <table className="min-w-[1120px] w-full border-collapse text-[12px]">
+                                <thead>
+                                    <tr className="border-b border-border/40 bg-[#13192b]/80 text-[11px] uppercase tracking-[0.16em] text-text-muted">
+                                        <th className="px-4 py-3 text-left min-w-[260px]">Task</th>
+                                        {weekdays.map((weekday) => (
+                                            <th key={weekday.key} className="px-3 py-3 text-center min-w-[140px]">
+                                                <div className="text-white">{weekday.shortLabel}</div>
+                                                <div className="mt-1 text-[10px] text-text-muted">{weekday.dateLabel}</div>
+                                            </th>
+                                        ))}
+                                        <th className="px-3 py-3 text-right min-w-[110px]">Actuals</th>
+                                        <th className="px-3 py-3 text-center min-w-[110px]">Save</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border/30">
+                                    {group.tasks.map((row, index) => {
+                                        const rowChanged = taskHasChanges(row);
+                                        return (
+                                            <tr key={row.task.id} className={index % 2 === 0 ? "bg-[#0d121d]/68" : "bg-[#101622]/74"}>
+                                                <td className="px-4 py-4 align-top">
+                                                    <div className="text-sm font-semibold text-white">{row.task.subject}</div>
+                                                    <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-text-muted">{row.task.status}</div>
+                                                </td>
+                                                {weekdays.map((weekday) => {
+                                                    const cellDraft = cellDrafts[row.task.id]?.[weekday.key] ?? { hours: "", note: "", isValueAdd: false };
+                                                    const draftValue = cellDraft.hours;
+                                                    const suggestion = getSuggestedHours(group, weekday.key);
+                                                    const hasExistingActuals = Number(row.dayHoursByDate[weekday.key] ?? 0) > 0.01;
+                                                    return (
+                                                        <td key={`${row.task.id}-${weekday.key}`} className="px-3 py-3 align-top">
+                                                            <div
+                                                                className={cn(
+                                                                    "rounded-2xl border bg-background/35 p-2.5 transition-colors",
+                                                                    cellDraft.note || cellDraft.isValueAdd ? "border-primary/40" : "border-border/50"
+                                                                )}
+                                                                onDoubleClick={() => openNoteEditor(row, weekday.key)}
+                                                            >
+                                                                <input
+                                                                    type="text"
+                                                                    inputMode="decimal"
+                                                                    value={draftValue}
+                                                                    onChange={(event) => handleCellChange(row.task.id, weekday.key, event.target.value)}
+                                                                    placeholder="0.0"
+                                                                    className="w-full rounded-lg border border-border/60 bg-[#0f1320] px-3 py-2 text-right text-sm font-semibold text-white outline-none transition-colors focus:border-primary"
+                                                                />
+                                                                <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-text-muted">
+                                                                    <span>{hasExistingActuals ? `Current ${Number(row.dayHoursByDate[weekday.key] ?? 0).toFixed(1)}h` : "Empty"}</span>
+                                                                    {!hasExistingActuals && suggestion > 0 && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => applySuggestedHours(row.task.id, weekday.key, suggestion)}
+                                                                            className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/15"
+                                                                        >
+                                                                            <Sparkles className="h-2.5 w-2.5" />
+                                                                            {suggestion.toFixed(1)}h
+                                                                        </button>
+                                                                    )}
                                                                 </div>
-                                                                <span className={cn(
-                                                                    "rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
-                                                                    entry.isValueAdd ? "bg-emerald-500/15 text-emerald-300" : "bg-surface/70 text-text-muted"
-                                                                )}>
-                                                                    {entry.isValueAdd ? "Value Add" : "Standard"}
-                                                                </span>
+                                                                <label className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-border/40 bg-[#0f1320]/70 px-2.5 py-2 text-[10px] text-text-muted">
+                                                                    <span className="font-medium uppercase tracking-[0.16em]">Value Add</span>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={cellDraft.isValueAdd}
+                                                                        onChange={(event) => {
+                                                                            const checked = event.target.checked;
+                                                                            setCellDrafts((prev) => ({
+                                                                                ...prev,
+                                                                                [row.task.id]: {
+                                                                                    ...(prev[row.task.id] ?? {}),
+                                                                                    [weekday.key]: {
+                                                                                        ...(prev[row.task.id]?.[weekday.key] ?? { hours: draftValue, note: "" }),
+                                                                                        isValueAdd: checked,
+                                                                                    },
+                                                                                },
+                                                                            }));
+                                                                        }}
+                                                                        className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                                                    />
+                                                                </label>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openNoteEditor(row, weekday.key)}
+                                                                    className="mt-2 inline-flex w-full items-center justify-center rounded-lg border border-border/40 bg-[#0f1320]/60 px-2.5 py-1.5 text-[10px] font-medium text-text-muted hover:border-primary/30 hover:text-white"
+                                                                >
+                                                                    {cellDraft.note ? "Edit Comment" : "Add Comment"}
+                                                                </button>
                                                             </div>
-                                                            <div className="mt-2 text-xs text-text-muted">
-                                                                {entry.note || "No note"}
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                );
-                            })}
+                                                        </td>
+                                                    );
+                                                })}
+                                                <td className="px-3 py-3 text-right align-middle">
+                                                    <div className="text-base font-semibold text-white">{row.totalActuals.toFixed(1)}</div>
+                                                </td>
+                                                <td className="px-3 py-3 align-middle">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleSaveRow(row)}
+                                                        disabled={isPending || savingTaskId === row.task.id || !rowChanged}
+                                                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-border/60 bg-surface/25 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-45"
+                                                    >
+                                                        <Check className="h-3.5 w-3.5" />
+                                                        {savingTaskId === row.task.id ? "Saving" : "Save"}
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 ))}
             </div>
+            {noteEditor && (
+                <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="flex items-center justify-between border-b border-border/50 bg-[#151a2b] px-5 py-4">
+                            <div>
+                                <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">Timesheet Comment</div>
+                                <div className="mt-1 text-base font-semibold text-white">{noteEditor.taskSubject}</div>
+                                <div className="mt-1 text-xs text-text-muted">{noteEditor.dateLabel}</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setNoteEditor(null)}
+                                className="inline-flex items-center justify-center rounded-md border border-border/60 p-2 text-text-muted hover:bg-surface-hover hover:text-white"
+                                aria-label="Close note editor"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="space-y-4 bg-[linear-gradient(180deg,#0f1424_0%,#0d121d_100%)] p-5">
+                            <label className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-[#151a2b] px-4 py-3 text-sm text-white">
+                                <span>Value Add</span>
+                                <input
+                                    type="checkbox"
+                                    checked={noteEditor.isValueAdd}
+                                    onChange={(event) => setNoteEditor((prev) => prev ? { ...prev, isValueAdd: event.target.checked } : prev)}
+                                    className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                />
+                            </label>
+                            <textarea
+                                value={noteEditor.note}
+                                onChange={(event) => setNoteEditor((prev) => prev ? { ...prev, note: event.target.value } : prev)}
+                                rows={10}
+                                placeholder="Add timesheet context, blockers, follow-ups, or value-add detail for this day."
+                                className="min-h-[240px] w-full resize-none rounded-xl border border-border/60 bg-[#0f1320] px-4 py-4 text-sm leading-7 text-white outline-none placeholder:text-text-muted focus:border-border/80"
+                                autoFocus
+                            />
+                            <div className="text-[11px] text-text-muted">
+                                Double-click any timesheet cell to edit its comment.
+                            </div>
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setNoteEditor(null)}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={saveNoteEditor}
+                                className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/15 px-3 py-2 text-sm font-medium text-white hover:bg-primary/25"
+                            >
+                                Save Comment
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </section>
     );
 }

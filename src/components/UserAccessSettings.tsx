@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { Mail, RefreshCcw, Shield, Trash2, UserPlus } from "lucide-react";
-import { deactivateProvisionedUser, inviteAppUser, type AppUserRecord, type ConsultantRecord, updateAppUserRole, resendAppUserInvite } from "@/app/actions";
+import { deactivateProvisionedUser, inviteAppUser, resendAppUserInvite, syncClickUpConsultantsAndUsers, type AppUserRecord, type ConsultantRecord, updateAppUserRole } from "@/app/actions";
 import { APP_ROLE_ORDER, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 interface UserAccessSettingsProps {
     initialUsers: AppUserRecord[];
@@ -12,6 +13,7 @@ interface UserAccessSettingsProps {
 }
 
 export function UserAccessSettings({ initialUsers, consultantDirectory, currentUserName, authEnabled }: UserAccessSettingsProps) {
+    const router = useRouter();
     const [users, setUsers] = useState<AppUserRecord[]>(initialUsers);
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
@@ -107,6 +109,22 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         });
     };
 
+    const handleRefreshRoster = () => {
+        setFeedback(null);
+        setError(null);
+        startTransition(async () => {
+            try {
+                setActionUserId("sync:roster");
+                await syncClickUpConsultantsAndUsers();
+                router.refresh();
+            } catch (err) {
+                setError(err instanceof Error ? err.message : "Unable to refresh consultant roster right now.");
+            } finally {
+                setActionUserId(null);
+            }
+        });
+    };
+
     const handleRoleChange = (userId: string, nextRole: AppRole) => {
         setFeedback(null);
         setError(null);
@@ -162,14 +180,25 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         <div className="mx-auto w-full max-w-6xl space-y-6">
             <section className="rounded-2xl border border-border/60 bg-surface/70 shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
                 <div className="border-b border-border/50 px-6 py-5">
-                    <div className="flex items-center gap-3">
-                        <Shield className="h-5 w-5 text-primary" />
-                        <div>
-                            <h1 className="text-xl font-semibold text-white">User Access</h1>
-                            <p className="mt-1 text-sm text-text-muted">
-                                Create users, assign roles, and send Google sign-in invites.
-                            </p>
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                            <Shield className="h-5 w-5 text-primary" />
+                            <div>
+                                <h1 className="text-xl font-semibold text-white">User Access</h1>
+                                <p className="mt-1 text-sm text-text-muted">
+                                    Create users, assign roles, and send Google sign-in invites.
+                                </p>
+                            </div>
                         </div>
+                        <button
+                            type="button"
+                            onClick={handleRefreshRoster}
+                            disabled={Boolean(actionUserId)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-border/60 bg-background/50 px-4 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-60"
+                        >
+                            <RefreshCcw className="h-4 w-4" />
+                            {actionUserId === "sync:roster" ? "Refreshing..." : "Refresh Consultant Roster"}
+                        </button>
                     </div>
                 </div>
 

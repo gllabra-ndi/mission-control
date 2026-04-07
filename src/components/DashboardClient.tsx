@@ -12,7 +12,7 @@ import { Timesheets } from "@/components/Timesheets";
 import { ClientSetup } from "@/components/ClientSetup";
 import { Trends } from "@/components/Trends";
 import { CapacityTrends } from "@/components/CapacityTrends";
-import { CapacityGridPayload, EditableTaskBillableRollupRecord, TaskSidebarStructureRecord, loadDashboardWeekData } from "@/app/actions";
+import { CapacityGridPayload, ClientDirectoryRecord, EditableTaskBillableRollupRecord, EditableTaskPlannedRollupRecord, TaskSidebarStructureRecord, loadDashboardWeekData } from "@/app/actions";
 import { ClickUpTask, TimeEntry, PROFESSIONAL_SERVICES_SPACE_ID } from "@/lib/clickup";
 import { Rocket } from "lucide-react";
 import { MissionEngineMark } from "@/components/BrandMarks";
@@ -28,6 +28,7 @@ interface DashboardClientProps {
     initialSelectedListId?: string | null;
     initialSelectedFolderId?: string | null;
     initialAssigneeFilter?: string | null;
+    initialTaskPlannedRollups?: EditableTaskPlannedRollupRecord[];
     initialTaskBillableRollups?: EditableTaskBillableRollupRecord[];
     initialSidebarStructure?: TaskSidebarStructureRecord;
 }
@@ -80,6 +81,7 @@ export function DashboardClient({
     initialSelectedListId = null,
     initialSelectedFolderId = null,
     initialAssigneeFilter = null,
+    initialTaskPlannedRollups = [],
     initialTaskBillableRollups = [],
     initialSidebarStructure = { folders: [], boards: [], placements: [], folderOverrides: [], hiddenFolderIds: [], hiddenBoardIds: [] },
 }: DashboardClientProps) {
@@ -93,8 +95,10 @@ export function DashboardClient({
     const [selectedFolderIdState, setSelectedFolderIdState] = useState<string | null>(initialSelectedFolderId);
     const [selectedAssigneeFilterState, setSelectedAssigneeFilterState] = useState<string | null>(initialAssigneeFilter);
     const [dashboardConfigState, setDashboardConfigState] = useState(dbConfig);
+    const [taskPlannedRollupsState, setTaskPlannedRollupsState] = useState<EditableTaskPlannedRollupRecord[]>(initialTaskPlannedRollups);
     const [taskBillableRollupsState, setTaskBillableRollupsState] = useState<EditableTaskBillableRollupRecord[]>(initialTaskBillableRollups);
     const [capacityGridState, setCapacityGridState] = useState<CapacityGridPayload>(dbConfig?.capacityGridConfig ?? EMPTY_CAPACITY_GRID);
+    const [weekDataVersion, setWeekDataVersion] = useState(0);
     const weekRequestIdRef = useRef(0);
     const weekSnapshotCacheRef = useRef<Map<string, DashboardWeekSnapshot>>(new Map());
     const weekPrefetchInFlightRef = useRef<Set<string>>(new Set());
@@ -108,17 +112,20 @@ export function DashboardClient({
         setSelectedFolderIdState(initialSelectedFolderId);
         setSelectedAssigneeFilterState(initialAssigneeFilter);
         setDashboardConfigState(dbConfig);
+        setTaskPlannedRollupsState(initialTaskPlannedRollups);
         setTaskBillableRollupsState(initialTaskBillableRollups);
         setCapacityGridState(dbConfig?.capacityGridConfig ?? EMPTY_CAPACITY_GRID);
+        setWeekDataVersion(0);
     }, [
         dbConfig,
         initialAssigneeFilter,
-        initialSelectedFolderId,
-        initialSelectedListId,
-        initialTab,
-        initialTaskBillableRollups,
-        weekStartStr,
-    ]);
+            initialSelectedFolderId,
+            initialSelectedListId,
+            initialTab,
+            initialTaskPlannedRollups,
+            initialTaskBillableRollups,
+            weekStartStr,
+        ]);
 
     const buildDashboardHref = useCallback((
         nextWeek: string,
@@ -709,9 +716,20 @@ export function DashboardClient({
         });
 
         setTaskBillableRollupsState(snapshot.taskBillableRollups ?? []);
+        setTaskPlannedRollupsState(snapshot.taskPlannedRollups ?? []);
         setCapacityGridState(snapshot.capacityGridConfig ?? EMPTY_CAPACITY_GRID);
         setActiveWeekStrState(week);
     }, []);
+
+    const refreshCurrentWeekSnapshot = useCallback(async () => {
+        const snapshot = await loadDashboardWeekData(
+            activeWeekStrState,
+            consultantsForRoster.map((consultant) => ({ id: consultant.id, name: consultant.name }))
+        );
+        weekSnapshotCacheRef.current.set(getWeekCacheKey(activeWeekStrState), snapshot);
+        applyWeekSnapshot(activeWeekStrState, snapshot);
+        setWeekDataVersion((prev) => prev + 1);
+    }, [activeWeekStrState, applyWeekSnapshot, consultantsForRoster, getWeekCacheKey]);
 
     useEffect(() => {
         const currentSnapshot: DashboardWeekSnapshot = {
@@ -723,12 +741,13 @@ export function DashboardClient({
             previousLeadConfigs: dbConfig?.previousLeadConfigs,
             previousClientConfigs: dbConfig?.previousClientConfigs,
             previousConsultantConfigs: dbConfig?.previousConsultantConfigs,
+            taskPlannedRollups: dbConfig?.taskPlannedRollups,
             previousTaskBillableRollups: dbConfig?.previousTaskBillableRollups,
             capacityGridConfig: dbConfig?.capacityGridConfig ?? EMPTY_CAPACITY_GRID,
             taskBillableRollups: initialTaskBillableRollups,
         };
         weekSnapshotCacheRef.current.set(getWeekCacheKey(weekStartStr), currentSnapshot);
-    }, [dbConfig, getWeekCacheKey, initialTaskBillableRollups, weekStartStr]);
+    }, [dbConfig, getWeekCacheKey, initialTaskBillableRollups, initialTaskPlannedRollups, weekStartStr]);
 
     const prefetchWeekSnapshot = useCallback((week: string) => {
         const cacheKey = getWeekCacheKey(week);
@@ -884,10 +903,11 @@ export function DashboardClient({
     const mergedDbConfig = useMemo(() => ({
         ...dashboardConfigState,
         capacityGridConfig: capacityGridState,
+        taskPlannedRollups: taskPlannedRollupsState,
         taskBillableRollups: taskBillableRollupsState,
         consultantConfigs: consultantConfigsForCommandCenter,
         previousConsultantConfigs: previousConsultantConfigsForCommandCenter,
-    }), [dashboardConfigState, capacityGridState, consultantConfigsForCommandCenter, previousConsultantConfigsForCommandCenter, taskBillableRollupsState]);
+    }), [dashboardConfigState, capacityGridState, consultantConfigsForCommandCenter, previousConsultantConfigsForCommandCenter, taskBillableRollupsState, taskPlannedRollupsState]);
 
     const handleConsultantConfigChange = (
         consultantId: number,
@@ -904,6 +924,13 @@ export function DashboardClient({
 
     const handleConsultantConfigReplace = useCallback((nextConfigs: Record<number, { maxCapacity: number; billableCapacity: number; notes: string }>) => {
         setConsultantConfigsState(nextConfigs);
+    }, []);
+
+    const handleClientDirectoryReplace = useCallback((nextClients: ClientDirectoryRecord[]) => {
+        setDashboardConfigState((prev: any) => ({
+            ...prev,
+            clientDirectory: nextClients,
+        }));
     }, []);
 
     return (
@@ -967,6 +994,8 @@ export function DashboardClient({
                                 tabId="issues"
                                 onNavigateWeek={handleWeekChange}
                                 onAssigneeFilterChange={handleAssigneeFilterChange}
+                                weekDataVersion={weekDataVersion}
+                                onWeekDataRefresh={refreshCurrentWeekSnapshot}
                             />
                         </section>
                     )}
@@ -1021,6 +1050,7 @@ export function DashboardClient({
                                 tasks={proServicesTasks}
                                 folders={availableFolders}
                                 activeAssigneeFilter={selectedAssigneeFilterState}
+                                plannedRollups={taskPlannedRollupsState}
                                 billableRollups={taskBillableRollupsState}
                                 onNavigateWeek={handleWeekChange}
                                 onSelectTab={handleTabSelect}
@@ -1032,7 +1062,10 @@ export function DashboardClient({
 
                     {resolvedActiveTab === "client-setup" && (
                         <section className="flex-1 flex flex-col min-h-[400px]">
-                            <ClientSetup initialClients={Array.isArray(dashboardConfigState?.clientDirectory) ? dashboardConfigState.clientDirectory : []} />
+                            <ClientSetup
+                                initialClients={Array.isArray(dashboardConfigState?.clientDirectory) ? dashboardConfigState.clientDirectory : []}
+                                onClientsChange={handleClientDirectoryReplace}
+                            />
                         </section>
                     )}
 
@@ -1060,9 +1093,13 @@ export function DashboardClient({
                                 tasks={proServicesTasks}
                                 consultants={consultantsForRoster}
                                 capacityGrid={capacityGridState}
+                                folders={availableFolders}
+                                clientDirectory={Array.isArray(dashboardConfigState?.clientDirectory) ? dashboardConfigState.clientDirectory : []}
                                 initialAssigneeFilter={selectedAssigneeFilterState}
                                 onNavigateWeek={handleWeekChange}
                                 onAssigneeFilterChange={handleTimesheetAssigneeFilterChange}
+                                weekDataVersion={weekDataVersion}
+                                onWeekDataRefresh={refreshCurrentWeekSnapshot}
                                 isWeekLoading={isWeekLoading}
                             />
                         </section>

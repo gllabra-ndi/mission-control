@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 
 interface ClientSetupProps {
     initialClients: ClientDirectoryRecord[];
+    onClientsChange?: (nextClients: ClientDirectoryRecord[]) => void;
 }
 
 type EditableClient = ClientDirectoryRecord & {
@@ -21,7 +22,7 @@ function toNullableNumber(value: string) {
     return Number.isFinite(numeric) ? numeric : null;
 }
 
-export function ClientSetup({ initialClients }: ClientSetupProps) {
+export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProps) {
     const router = useRouter();
     const [clients, setClients] = useState<EditableClient[]>(initialClients);
     const [isPending, startTransition] = useTransition();
@@ -99,10 +100,15 @@ export function ClientSetup({ initialClients }: ClientSetupProps) {
                 sortOrder: client.sortOrder,
             });
             if (!saved) return;
-            setClients((prev) => prev.map((entry) => (
+            const nextClients = clients.map((entry) => (
                 entry.id === client.id ? saved : entry
-            )));
-            router.refresh();
+            ));
+            setClients(nextClients);
+            if (onClientsChange) {
+                onClientsChange(nextClients);
+            } else {
+                router.refresh();
+            }
         });
     };
 
@@ -116,8 +122,13 @@ export function ClientSetup({ initialClients }: ClientSetupProps) {
 
         startTransition(async () => {
             await deleteClientDirectoryEntry(client.id);
-            setClients((prev) => prev.filter((entry) => entry.id !== client.id));
-            router.refresh();
+            const nextClients = clients.filter((entry) => entry.id !== client.id);
+            setClients(nextClients);
+            if (onClientsChange) {
+                onClientsChange(nextClients);
+            } else {
+                router.refresh();
+            }
         });
     };
 

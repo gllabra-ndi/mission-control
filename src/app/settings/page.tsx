@@ -1,4 +1,4 @@
-import { getAppUsers, syncClickUpConsultantsAndUsers } from "@/app/actions";
+import { getAppUsers, getConsultantUtilizationDirectory } from "@/app/actions";
 import { UserAccessSettings } from "@/components/UserAccessSettings";
 import { getAppSession, isAuthEnabled, requireAdminSession } from "@/lib/auth";
 import Link from "next/link";
@@ -8,7 +8,7 @@ export default async function SettingsPage() {
         await requireAdminSession();
     }
 
-    const consultantRoster = await syncClickUpConsultantsAndUsers();
+    const consultantRoster = await getConsultantUtilizationDirectory();
 
     const [users, session] = await Promise.all([
         getAppUsers(consultantRoster),

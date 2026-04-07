@@ -35,6 +35,8 @@ type AddConsultantFormState = {
     email: string;
 };
 
+type ConsultantNumericField = "maxCapacity" | "billableCapacity";
+
 function normalizeName(value: string) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -42,6 +44,18 @@ function normalizeName(value: string) {
 function getAllocationHours(cell: unknown) {
     const legacyCell = cell as { hours?: number; wt?: number; wPlus?: number } | undefined;
     return Number(legacyCell?.hours ?? Number(legacyCell?.wt ?? 0) + Number(legacyCell?.wPlus ?? 0));
+}
+
+function sanitizeDecimalDraft(value: string) {
+    const sanitized = String(value || "").replace(/[^0-9.]/g, "");
+    const firstDotIndex = sanitized.indexOf(".");
+    if (firstDotIndex === -1) return sanitized;
+    return `${sanitized.slice(0, firstDotIndex + 1)}${sanitized.slice(firstDotIndex + 1).replace(/\./g, "")}`;
+}
+
+function formatEditableNumber(value: number | string | null | undefined) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(numeric) : "";
 }
 
 function selectInputValueOnFocus(event: FocusEvent<HTMLInputElement>) {
@@ -76,6 +90,7 @@ export function ConsultantUtilization({
         lastName: "",
         email: "",
     });
+    const [numericInputDrafts, setNumericInputDrafts] = useState<Record<string, string>>({});
     const navUnlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const activeWeekDate = new Date(activeWeekStr + "T00:00:00");
     const isNavigationBlocked = !onNavigateWeek && (isWeekNavLocked || isWeekLoading);
@@ -128,6 +143,10 @@ export function ConsultantUtilization({
             if (navUnlockTimerRef.current) clearTimeout(navUnlockTimerRef.current);
         };
     }, []);
+
+    useEffect(() => {
+        setNumericInputDrafts({});
+    }, [activeWeekStr]);
 
     const consultantDirectoryById = useMemo(() => {
         const byId = new Map<number, { id: number; name: string; firstName?: string; lastName?: string; email?: string; source?: string }>();
@@ -236,6 +255,25 @@ export function ConsultantUtilization({
                 billableCapacity: Number(next.billableCapacity ?? 40),
                 notes: String(next.notes ?? ""),
             });
+        });
+    };
+
+    const getNumericDraftKey = (consultantId: number, field: ConsultantNumericField) => `${consultantId}:${field}`;
+
+    const commitConsultantNumericField = (
+        consultantId: number,
+        field: ConsultantNumericField,
+        fallbackValue: number
+    ) => {
+        const draftKey = getNumericDraftKey(consultantId, field);
+        const rawDraft = numericInputDrafts[draftKey];
+        const nextValue = Math.max(0, Number(rawDraft ?? fallbackValue) || 0);
+        onConsultantConfigChange?.(consultantId, { [field]: nextValue });
+        persistConsultant(consultantId, { [field]: nextValue });
+        setNumericInputDrafts((prev) => {
+            const next = { ...prev };
+            delete next[draftKey];
+            return next;
         });
     };
 
@@ -499,7 +537,7 @@ export function ConsultantUtilization({
                             <tr className="border-b border-border/50 text-text-muted text-[11px] uppercase tracking-wider bg-surface/10">
                                 <th className="px-5 py-2.5 font-medium min-w-[180px]">Consultant</th>
                                 <th className="px-5 py-2.5 font-medium w-24 border-l border-border/30">Max Capacity</th>
-                                <th className="px-5 py-2.5 font-medium w-36 border-l border-border/30 text-amber-500/80">Billable Capacity</th>
+                                <th className="px-5 py-2.5 font-medium w-36 border-l border-border/30 text-amber-500/80">Actuals Capacity</th>
                                 <th className="px-5 py-2.5 font-medium w-24 bg-indigo-500/5 text-white font-bold">Hours</th>
                                 <th className="px-5 py-2.5 font-medium w-24">Util %</th>
                                 <th className="px-5 py-2.5 font-medium w-28 text-right">Available Hrs</th>
@@ -510,6 +548,8 @@ export function ConsultantUtilization({
                         <tbody className="divide-y divide-border/30">
                             {consultantsForCurrentTab.map((consultant) => {
                                 const cfg = consultantConfigsById[consultant.id] || { maxCapacity: 40, billableCapacity: 40, notes: "" };
+                                const maxCapacityDraftKey = getNumericDraftKey(consultant.id, "maxCapacity");
+                                const billableCapacityDraftKey = getNumericDraftKey(consultant.id, "billableCapacity");
                                 const hours =
                                     capacityHoursByConsultant.byId.get(consultant.id) ||
                                     capacityHoursByConsultant.byName.get(normalizeName(consultant.name)) ||
@@ -533,23 +573,45 @@ export function ConsultantUtilization({
                                         </td>
                                         <td className="px-5 py-2 border-l border-border/30">
                                             <input
-                                                type="number"
+                                                type="text"
+                                                inputMode="decimal"
                                                 disabled={isPastWeek}
-                                                value={cfg.maxCapacity ?? 40}
-                                                onFocus={selectInputValueOnFocus}
-                                                onChange={(e) => onConsultantConfigChange?.(consultant.id, { maxCapacity: Number(e.target.value) })}
-                                                onBlur={(e) => persistConsultant(consultant.id, { maxCapacity: Number(e.target.value) })}
+                                                value={numericInputDrafts[maxCapacityDraftKey] ?? formatEditableNumber(cfg.maxCapacity ?? 40)}
+                                                onFocus={(event) => {
+                                                    setNumericInputDrafts((prev) => (
+                                                        prev[maxCapacityDraftKey] !== undefined
+                                                            ? prev
+                                                            : { ...prev, [maxCapacityDraftKey]: formatEditableNumber(cfg.maxCapacity ?? 40) }
+                                                    ));
+                                                    selectInputValueOnFocus(event);
+                                                }}
+                                                onChange={(e) => {
+                                                    const next = sanitizeDecimalDraft(e.target.value);
+                                                    setNumericInputDrafts((prev) => ({ ...prev, [maxCapacityDraftKey]: next }));
+                                                }}
+                                                onBlur={() => commitConsultantNumericField(consultant.id, "maxCapacity", cfg.maxCapacity ?? 40)}
                                                 className="w-16 bg-surface border border-border rounded px-2 py-1 focus:border-indigo-500 outline-none transition-colors text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed text-xs"
                                             />
                                         </td>
                                         <td className="px-5 py-2 text-amber-400 font-medium bg-amber-500/5 border-l border-border/30">
                                             <input
-                                                type="number"
+                                                type="text"
+                                                inputMode="decimal"
                                                 disabled={isPastWeek}
-                                                value={cfg.billableCapacity ?? 40}
-                                                onFocus={selectInputValueOnFocus}
-                                                onChange={(e) => onConsultantConfigChange?.(consultant.id, { billableCapacity: Number(e.target.value) })}
-                                                onBlur={(e) => persistConsultant(consultant.id, { billableCapacity: Number(e.target.value) })}
+                                                value={numericInputDrafts[billableCapacityDraftKey] ?? formatEditableNumber(cfg.billableCapacity ?? 40)}
+                                                onFocus={(event) => {
+                                                    setNumericInputDrafts((prev) => (
+                                                        prev[billableCapacityDraftKey] !== undefined
+                                                            ? prev
+                                                            : { ...prev, [billableCapacityDraftKey]: formatEditableNumber(cfg.billableCapacity ?? 40) }
+                                                    ));
+                                                    selectInputValueOnFocus(event);
+                                                }}
+                                                onChange={(e) => {
+                                                    const next = sanitizeDecimalDraft(e.target.value);
+                                                    setNumericInputDrafts((prev) => ({ ...prev, [billableCapacityDraftKey]: next }));
+                                                }}
+                                                onBlur={() => commitConsultantNumericField(consultant.id, "billableCapacity", cfg.billableCapacity ?? 40)}
                                                 className="w-20 bg-transparent border border-amber-500/30 rounded px-2 py-1 focus:border-amber-500 outline-none transition-colors text-amber-400 font-medium disabled:opacity-50 disabled:cursor-not-allowed text-xs"
                                             />
                                         </td>
