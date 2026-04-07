@@ -7,8 +7,6 @@ import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
-import { generateText } from "ai";
-import { openai } from "@ai-sdk/openai";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
 import {
@@ -118,9 +116,17 @@ export interface ClientDashboardNarrativeInput {
     }>;
 }
 
+export interface ClientDashboardTaskNarrative {
+    taskId: string;
+    taskName: string;
+    workSummary: string;
+    valueContribution: string;
+}
+
 export interface ClientDashboardNarrativeResult {
     detailedWorkPerformed: string;
     valueDelivered: string;
+    taskNarratives?: ClientDashboardTaskNarrative[];
     source: "llm" | "fallback";
     generatedAt: string;
 }
@@ -1365,12 +1371,57 @@ function buildFallbackNarratives(args: ClientDashboardNarrativeInput): ClientDas
         ].join("\n")
         : `No billable activity was posted for ${args.clientName} in the selected ${args.viewMode}.`;
 
+    const taskNarratives = args.tasks.length > 0
+        ? args.tasks.map((task) => {
+            const hours = byTask.get(String(task.id)) || 0;
+            return {
+                taskId: String(task.id),
+                taskName: String(task.name),
+                workSummary: hours > 0 ? `Work performed includes ${hours.toFixed(1)} actual hours on this task.` : "No actual hours were posted in the selected period.",
+                valueContribution: "Work was tracked and applied to client delivery activities. Replace with descriptive notes from task context when LLM narration is available.",
+            };
+        })
+        : [];
+
     return {
         detailedWorkPerformed: taskLines,
         valueDelivered: valueLines,
+        taskNarratives,
         source: "fallback",
         generatedAt: new Date().toISOString(),
     };
+}
+
+function extractGeminiTextPayload(response: any): string {
+    if (!response || typeof response !== "object") return "";
+    const text = response?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof text === "string") {
+        return text.trim();
+    }
+    if (typeof response?.text === "string") {
+        return response.text.trim();
+    }
+    return "";
+}
+
+function sanitizeTaskNarratives(args: ClientDashboardNarrativeInput, items: unknown[]): ClientDashboardTaskNarrative[] {
+    const byTaskId = new Set(args.tasks.map((task) => String(task.id)));
+    if (!Array.isArray(items)) return [];
+
+    return items
+        .map((item: any) => ({
+            taskId: String(item?.taskId || "").trim(),
+            taskName: String(item?.taskName || item?.taskname || item?.name || "").trim(),
+            workSummary: String(item?.workSummary || item?.summary || "").trim(),
+            valueContribution: String(item?.valueContribution || item?.value || item?.impact || "").trim(),
+        }))
+        .filter((item) => item.taskId && byTaskId.has(item.taskId) && (item.workSummary || item.valueContribution))
+        .map((item) => ({
+            taskId: item.taskId,
+            taskName: item.taskName,
+            workSummary: item.workSummary || "Work completed during this period.",
+            valueContribution: item.valueContribution || "Value was delivered through task progress.",
+        }));
 }
 
 function extractTaskText(task: { name: string; description?: string; status?: string; listName?: string; assignees?: string }) {
@@ -1410,39 +1461,79 @@ export async function generateClientDashboardNarratives(input: ClientDashboardNa
         return buildFallbackNarratives(clean);
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    const googleApiKey = String(process.env.GOOGLE_GENAI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+    if (!googleApiKey) {
         return buildFallbackNarratives(clean);
     }
 
     const totalHours = clean.timeEntries.reduce((sum, entry) => sum + Number(entry.hours || 0), 0);
     const lines = clean.tasks.map((task, index) => `Task ${index + 1}: ${extractTaskText(task)}`);
-    const prompt = `You are generating executive reporting text for a client status dashboard.
-Create concise, client-facing language using the source data below.
+    const prompt = `You are generating executive reporting text for a client dashboard.
+Use the source data to write client-facing reporting text that helps fill missing task fields.
 Client: ${clean.clientName}
 Period: ${clean.viewMode} (${clean.periodStart} - ${clean.periodEnd})
 Total actual hours: ${totalHours.toFixed(1)}
 
 Task context:
-${lines.slice(0, 40).join("\n")}
+${lines.slice(0, 60).join("\n")}
 
-Return ONLY valid JSON in this exact shape with short plain-English copy:
+Return ONLY valid JSON in this exact shape, keep copy short and professional:
 {
-  "detailedWorkPerformed": "A concise paragraph or 3-5 bullets summarized from task names/description.",
-  "valueDelivered": "A concise paragraph describing business/client value delivered this period."
+  "detailedWorkPerformed": "A concise paragraph or 3-5 bullets summarizing this period.",
+  "valueDelivered": "A concise paragraph describing business/client value delivered this period.",
+  "taskNarratives": [
+    {
+      "taskId": "<task.id>",
+      "taskName": "<task.name>",
+      "workSummary": "Client-facing summary of what was done for this task in the period.",
+      "valueContribution": "Client-facing value statement tied to this task."
+    }
+  ]
 }`;
 
     try {
-        const { text } = await generateText({
-            model: openai(process.env.OPENAI_MODEL || "gpt-4o-mini"),
-            prompt,
-        });
-        const parsed = JSON.parse(text || "{}") as { detailedWorkPerformed?: string; valueDelivered?: string };
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(process.env.GOOGLE_GENAI_MODEL || "gemini-1.5-flash")}:generateContent?key=${encodeURIComponent(googleApiKey)}`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                cache: "no-store",
+                body: JSON.stringify({
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [{ text: prompt }],
+                        },
+                    ],
+                    generationConfig: {
+                        temperature: 0.2,
+                        responseMimeType: "application/json",
+                    },
+                }),
+            }
+        );
+        if (!response.ok) {
+            return buildFallbackNarratives(clean);
+        }
+        const payload = await response.json();
+        const text = extractGeminiTextPayload(payload);
+        const parsed = JSON.parse(text || "{}") as {
+            detailedWorkPerformed?: string;
+            valueDelivered?: string;
+            taskNarratives?: unknown[];
+        };
         const detailedWorkPerformed = String(parsed.detailedWorkPerformed || "").trim() || buildFallbackNarratives(clean).detailedWorkPerformed;
         const valueDelivered = String(parsed.valueDelivered || "").trim() || buildFallbackNarratives(clean).valueDelivered;
+        const taskNarratives = sanitizeTaskNarratives(clean, parsed.taskNarratives || []);
+        const fallback = buildFallbackNarratives(clean);
+        const enrichedTaskNarratives = taskNarratives.length > 0 ? taskNarratives : fallback.taskNarratives || [];
 
         return {
             detailedWorkPerformed,
             valueDelivered,
+            taskNarratives: enrichedTaskNarratives,
             source: "llm",
             generatedAt: new Date().toISOString(),
         };
