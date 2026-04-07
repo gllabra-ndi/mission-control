@@ -72,12 +72,15 @@ export function normalizeEditableTaskLifecycle(input: {
     plannedWeek?: unknown;
     closedDate?: unknown;
     status?: unknown;
+    estimateHours?: unknown;
+    [key: string]: unknown;
 }) {
     const week = normalizeWeekKey(input.week);
     const plannedWeek = normalizeWeekKey(input.plannedWeek);
     const closedDate = normalizeDateKey(input.closedDate);
     const status = normalizeEditableTaskStatus(input.status);
-    return { week, plannedWeek, closedDate, status };
+    const estimateHours = normalizeEstimateHours(input.estimateHours);
+    return { week, plannedWeek, closedDate, status, estimateHours };
 }
 
 export function getEffectiveEditableTaskStatus(
@@ -110,7 +113,22 @@ export function isEditableTaskVisibleInWeek(
     return closedDate >= active;
 }
 
-export function buildEditableTaskSeedFromClickUp(task: ClickUpTask, activeWeekStr: string) {
+export function buildEditableTaskSeedFromClickUp(
+    task: ClickUpTask,
+    activeWeekStr: string
+): {
+    sourceTaskId: string;
+    subject: string;
+    description: string;
+    assignee: string;
+    isAi: boolean;
+    estimateHours: number;
+    billableHoursToday: number;
+    week: string;
+    plannedWeek: string;
+    closedDate: string;
+    status: EditableTaskStatus;
+} {
     const sourceTaskId = String(task?.id ?? "").trim();
     const week = normalizeWeekKey(activeWeekStr) || getWeekStartKeyForDate(new Date());
 
@@ -120,7 +138,7 @@ export function buildEditableTaskSeedFromClickUp(task: ClickUpTask, activeWeekSt
         ? String(task.assignees[0]?.username ?? "").trim()
         : "";
 
-    const status = closedDate ? "closed" : "backlog";
+    const status: EditableTaskStatus = closedDate ? "closed" : "backlog";
 
     return {
         sourceTaskId,
