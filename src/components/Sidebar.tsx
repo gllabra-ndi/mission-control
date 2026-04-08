@@ -85,7 +85,6 @@ const projectItems = [
 
 function FoldersContent({
     foldersPromise,
-    tasksPromise,
     sidebarStructure,
     clientOptions,
     visibleFolders,
@@ -107,7 +106,6 @@ function FoldersContent({
     setEditBoardTarget,
 }: any) {
     const initialFoldersRaw = foldersPromise ? use(foldersPromise) : (visibleFolders || []);
-    const initialTasks = tasksPromise ? use(tasksPromise) : [];
 
     const availableFolders = useMemo(() => {
         const initialFolders = foldersPromise ? initialFoldersRaw : (visibleFolders || []);
@@ -666,7 +664,6 @@ export function Sidebar({
                     }>
                         <FoldersContent
                             foldersPromise={foldersPromise}
-                            tasksPromise={initialTasksPromise}
                             sidebarStructure={initialSidebarStructure}
                             clientOptions={clientOptions}
                             visibleFolders={visibleFolders}

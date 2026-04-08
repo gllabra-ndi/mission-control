@@ -164,7 +164,7 @@ export async function getSpaceFoldersWithLists(spaceId: string, excludedFolderId
 }
 
 // Fetch all tasks for a specific team with pagination to grab everything
-export async function getTeamTasks(filters?: { textSearch?: string; assigneeName?: string; status?: string }) {
+export async function getTeamTasks(filters?: { textSearch?: string; assigneeName?: string; status?: string; spaceIds?: string[]; daysBack?: number }) {
     if (!TEAM_ID) return [];
 
     let allTasks: ClickUpTask[] = [];
@@ -196,10 +196,17 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
     });
 
     try {
-        // Speculatively fetch the first 10 pages in parallel to significantly reduce load time
-        const maxPages = 10;
+        const spaceIdsParam = filters?.spaceIds && filters.spaceIds.length > 0 
+            ? filters.spaceIds.map(id => `space_ids[]=${id}`).join('&')
+            : `space_ids[]=${PROFESSIONAL_SERVICES_SPACE_ID}`;
+        
+        const daysBack = filters?.daysBack ?? 60;
+        const dateUpdatedGt = Date.now() - (daysBack * 24 * 60 * 60 * 1000);
+
+        // Speculatively fetch the first 20 pages in parallel to significantly reduce load time
+        const maxPages = 20;
         const pagePromises = Array.from({ length: maxPages }).map((_, i) =>
-            fetchWithAuth(`/team/${TEAM_ID}/task?page=${i}&subtasks=true&include_closed=true`)
+            fetchWithAuth(`/team/${TEAM_ID}/task?${spaceIdsParam}&page=${i}&subtasks=true&include_closed=true&date_updated_gt=${dateUpdatedGt}`)
         );
         const results = await Promise.all(pagePromises);
 
@@ -217,11 +224,11 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
             }
         }
 
-        // If we exactly hit 100 tasks on the 10th page, there might be more. Fetch the rest sequentially.
+        // If we exactly hit 100 tasks on the 20th page, there might be more. Fetch the rest sequentially.
         let page = maxPages;
         let lastBatchLength = results[maxPages - 1]?.tasks?.length || 0;
         while (lastBatchLength === 100) {
-            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?page=${page}&subtasks=true&include_closed=true`);
+            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?${spaceIdsParam}&page=${page}&subtasks=true&include_closed=true&date_updated_gt=${dateUpdatedGt}`);
             if (res.error || !res.tasks) break;
             
             const currentTasks = res.tasks as any[];
