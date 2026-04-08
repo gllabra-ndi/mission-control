@@ -12,6 +12,7 @@ import { Timesheets } from "@/components/Timesheets";
 import { ClientSetup } from "@/components/ClientSetup";
 import { Trends } from "@/components/Trends";
 import { CapacityTrends } from "@/components/CapacityTrends";
+import { ClientDashboard } from "@/components/ClientDashboard";
 import { CapacityGridPayload, ClientDirectoryRecord, EditableTaskBillableRollupRecord, EditableTaskPlannedRollupRecord, TaskSidebarStructureRecord, loadDashboardWeekData } from "@/app/actions";
 import { ClickUpTask, TimeEntry, PROFESSIONAL_SERVICES_SPACE_ID } from "@/lib/clickup";
 import { Rocket } from "lucide-react";
@@ -27,6 +28,7 @@ interface DashboardClientProps {
     initialTab?: string;
     initialSelectedListId?: string | null;
     initialSelectedFolderId?: string | null;
+    initialSelectedClientId?: string | null;
     initialAssigneeFilter?: string | null;
     initialTaskPlannedRollups?: EditableTaskPlannedRollupRecord[];
     initialTaskBillableRollups?: EditableTaskBillableRollupRecord[];
@@ -50,7 +52,7 @@ type ClientOption = {
 type DashboardExtraParams = Record<string, string | null | undefined>;
 
 const EMPTY_CAPACITY_GRID: CapacityGridPayload = { resources: [], rows: [] };
-const VALID_TABS = new Set(["issues", "editable-tasks", "command-center", "trends", "capacity-trends", "consultant-utilization", "timesheets", "capacity-grid", "client-setup", "backlog-growth"]);
+const VALID_TABS = new Set(["issues", "editable-tasks", "command-center", "trends", "capacity-trends", "consultant-utilization", "timesheets", "capacity-grid", "client-setup", "backlog-growth", "client-dashboard"]);
 const normalizeTab = (tab?: string) => (tab && VALID_TABS.has(tab) ? tab : "command-center");
 type DashboardWeekSnapshot = Awaited<ReturnType<typeof loadDashboardWeekData>>;
 
@@ -80,6 +82,7 @@ export function DashboardClient({
     initialTab,
     initialSelectedListId = null,
     initialSelectedFolderId = null,
+    initialSelectedClientId = null,
     initialAssigneeFilter = null,
     initialTaskPlannedRollups = [],
     initialTaskBillableRollups = [],
@@ -93,6 +96,7 @@ export function DashboardClient({
     const [activeTabState, setActiveTabState] = useState(normalizeTab(initialTab));
     const [selectedListIdState, setSelectedListIdState] = useState<string | null>(initialSelectedListId);
     const [selectedFolderIdState, setSelectedFolderIdState] = useState<string | null>(initialSelectedFolderId);
+    const [selectedClientIdState, setSelectedClientIdState] = useState<string | null>(initialSelectedClientId);
     const [selectedAssigneeFilterState, setSelectedAssigneeFilterState] = useState<string | null>(initialAssigneeFilter);
     const [dashboardConfigState, setDashboardConfigState] = useState(dbConfig);
     const [taskPlannedRollupsState, setTaskPlannedRollupsState] = useState<EditableTaskPlannedRollupRecord[]>(initialTaskPlannedRollups);
@@ -110,6 +114,7 @@ export function DashboardClient({
         setActiveTabState(normalizeTab(initialTab));
         setSelectedListIdState(initialSelectedListId);
         setSelectedFolderIdState(initialSelectedFolderId);
+        setSelectedClientIdState(initialSelectedClientId);
         setSelectedAssigneeFilterState(initialAssigneeFilter);
         setDashboardConfigState(dbConfig);
         setTaskPlannedRollupsState(initialTaskPlannedRollups);
@@ -121,6 +126,7 @@ export function DashboardClient({
         initialAssigneeFilter,
             initialSelectedFolderId,
             initialSelectedListId,
+            initialSelectedClientId,
             initialTab,
             initialTaskPlannedRollups,
             initialTaskBillableRollups,
@@ -146,12 +152,15 @@ export function DashboardClient({
         if (nextListId) {
             params.set("listId", nextListId);
             params.delete("folderId");
+            params.delete("clientId");
         } else if (nextFolderId) {
             params.set("folderId", nextFolderId);
             params.delete("listId");
+            params.delete("clientId");
         } else {
             params.delete("listId");
             params.delete("folderId");
+            // Note: clientId is managed via extraParams if we want to delete it or set it.
         }
         params.delete("returnTo");
         Object.entries(extraParams).forEach(([key, value]) => {
@@ -426,7 +435,20 @@ export function DashboardClient({
                 .map((folderId) => buildFolder(folderId))
                 .filter((folder): folder is FolderWithLists => folder !== null);
 
-            return [...clickupFolders, ...localFolders, ...placementFolders];
+            const allFolders = [...clickupFolders, ...localFolders, ...placementFolders];
+            return allFolders.sort((a, b) => {
+                const aName = a.name.toUpperCase();
+                const bName = b.name.toUpperCase();
+                const aIsMikisew = aName === "MIKISEW";
+                const bIsMikisew = bName === "MIKISEW";
+                const aIsNDI = aName.includes("NDI INTERNAL");
+                const bIsNDI = bName.includes("NDI INTERNAL");
+                if (aIsMikisew && !bIsMikisew) return -1;
+                if (!aIsMikisew && bIsMikisew) return 1;
+                if (aIsNDI && !bIsNDI) return 1;
+                if (!aIsNDI && bIsNDI) return -1;
+                return aName.localeCompare(bName);
+            });
         }
 
         const folderMap = new Map<string, { id: string, name: string, source: "clickup", lists: Map<string, { id: string, name: string, statusOrder: string[], source: "clickup" }> }>();
@@ -486,7 +508,20 @@ export function DashboardClient({
             .map((folderId) => buildFolder(folderId))
             .filter((folder): folder is FolderWithLists => folder !== null);
 
-        return [...clickupFolders, ...localFolders, ...placementFolders];
+        const allFolders = [...clickupFolders, ...localFolders, ...placementFolders];
+        return allFolders.sort((a, b) => {
+            const aName = a.name.toUpperCase();
+            const bName = b.name.toUpperCase();
+            const aIsMikisew = aName === "MIKISEW";
+            const bIsMikisew = bName === "MIKISEW";
+            const aIsNDI = aName.includes("NDI INTERNAL");
+            const bIsNDI = bName.includes("NDI INTERNAL");
+            if (aIsMikisew && !bIsMikisew) return -1;
+            if (!aIsMikisew && bIsMikisew) return 1;
+            if (aIsNDI && !bIsNDI) return 1;
+            if (!aIsNDI && bIsNDI) return -1;
+            return aName.localeCompare(bName);
+        });
     }, [clientOptions, initialFolders, initialSidebarStructure, proServicesTasks]);
 
     const handleListSelect = (listId: string | null) => {
@@ -495,9 +530,15 @@ export function DashboardClient({
     };
 
     const handleFolderSelect = (folderId: string | null) => {
-        const nextTab = "issues";
-        navigateWithState(nextTab, null, folderId);
+        navigateWithState("issues", null, folderId);
     };
+
+    const handleClientSelect = useCallback((clientId: string) => {
+        setSelectedClientIdState(clientId);
+        setSelectedListIdState(null);
+        setSelectedFolderIdState(null);
+        navigateWithState("client-dashboard", null, null, null, { clientId });
+    }, [navigateWithState]);
 
     const handleTabSelect = (tab: string) => {
         const nextTab = VALID_TABS.has(tab) ? tab : "command-center";
@@ -940,11 +981,13 @@ export function DashboardClient({
                 clientOptions={clientOptions}
                 selectedListId={selectedListIdState}
                 selectedFolderId={selectedFolderIdState}
+                selectedClientId={selectedClientIdState}
                 activeTab={resolvedActiveTab}
                 weekStr={activeWeekStrState}
                 assigneeFilter={selectedAssigneeFilterState}
                 onSelectList={handleListSelect}
                 onSelectFolder={handleFolderSelect}
+                onSelectClient={handleClientSelect}
                 onSelectTab={handleTabSelect}
                 teamsLabel="Teams"
             />
@@ -1113,6 +1156,62 @@ export function DashboardClient({
                             />
                         </section>
                     )}
+
+                    {resolvedActiveTab === "client-dashboard" && (() => {
+                        const fallbackClientId = Array.isArray(dashboardConfigState?.clientDirectory) && dashboardConfigState.clientDirectory.length > 0
+                            ? String(dashboardConfigState.clientDirectory[0].id)
+                            : null;
+                        
+                        const effectiveClientId = selectedClientIdState || fallbackClientId;
+
+                        if (!effectiveClientId) {
+                            return (
+                                <section className="flex-1 flex flex-col items-center justify-center min-h-[400px]">
+                                    <div className="text-text-muted italic">No clients configured. Please add clients in Setup.</div>
+                                </section>
+                            );
+                        }
+
+                        const clientDirRecord = Array.isArray(dashboardConfigState?.clientDirectory)
+                            ? dashboardConfigState.clientDirectory.find((c: any) => String(c.id) === effectiveClientId)
+                            : null;
+                        const clientName = clientDirRecord?.name || "Client";
+                        const clientNameKey = clientName ? clientName.toLowerCase().replace(/[^a-z0-9]+/g, "") : "";
+                        
+                        const clientListIds = new Set(
+                            availableFolders.flatMap(f => f.lists).filter(l => l.clientId === effectiveClientId).map(l => l.id)
+                        );
+                        
+                        const clientTasks = proServicesTasks.filter(t => {
+                            if (clientListIds.has(t.list.id)) return true;
+                            // Fallback to name matching since placement associations might not be complete
+                            const listNameKey = t.list.name ? t.list.name.toLowerCase().replace(/[^a-z0-9]+/g, "") : "";
+                            const folderNameKey = t.folder.name ? t.folder.name.toLowerCase().replace(/[^a-z0-9]+/g, "") : "";
+                            
+                            // If clientname is in list or folder, bind it to dashboard.
+                            if (clientNameKey && listNameKey && (listNameKey === clientNameKey || listNameKey.includes(clientNameKey) || clientNameKey.includes(listNameKey))) return true;
+                            if (clientNameKey && folderNameKey && (folderNameKey === clientNameKey || folderNameKey.includes(clientNameKey) || clientNameKey.includes(folderNameKey))) return true;
+                            
+                            return false;
+                        });
+                        const clientTimeEntries = initialTimeEntries.filter(e => clientTasks.some(t => t.id === e.task?.id));
+
+                        return (
+                            <section className="flex-1 flex flex-col min-h-[400px]">
+                                <ClientDashboard
+                                    clientId={effectiveClientId}
+                                    clientName={clientName}
+                                    activeWeekStr={activeWeekStrState}
+                                    tasks={clientTasks}
+                                    timeEntries={clientTimeEntries}
+                                    clientOptions={Array.isArray(dashboardConfigState?.clientDirectory) ? dashboardConfigState.clientDirectory : []}
+                                    onSelectClient={handleClientSelect}
+                                    onNavigateWeek={handleWeekChange}
+                                    isWeekLoading={isWeekLoading}
+                                />
+                            </section>
+                        );
+                    })()}
                 </div>
             </main>
         </div>

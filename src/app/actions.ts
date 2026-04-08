@@ -9,6 +9,7 @@ import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
+import { STANDARD_CLIENT_ROLES } from "@/lib/clientRoles";
 import {
     getEffectiveEditableTaskStatus,
     getWeekStartKeyForDate,
@@ -130,16 +131,6 @@ export interface ClientDashboardNarrativeResult {
     source: "llm" | "fallback";
     generatedAt: string;
 }
-
-export const STANDARD_CLIENT_ROLES = [
-    "Primary Contact",
-    "Secondary Contact",
-    "Billing Contact",
-    "Project Sponsor",
-    "Project Manager",
-    "Technical Contact",
-    "Operations Contact",
-];
 
 type LegacyClientDefaults = {
     name: string;

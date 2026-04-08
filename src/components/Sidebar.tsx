@@ -20,7 +20,8 @@ import {
     Pencil,
     Plus,
     Trash2,
-    X
+    X,
+    PieChart
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -51,11 +52,13 @@ interface SidebarProps {
     clientOptions?: SidebarClientOption[];
     selectedListId?: string | null;
     selectedFolderId?: string | null;
+    selectedClientId?: string | null;
     activeTab?: string;
     weekStr?: string;
     assigneeFilter?: string | null;
     onSelectList?: (id: string | null) => void;
     onSelectFolder?: (id: string | null) => void;
+    onSelectClient?: (clientId: string) => void;
     onSelectTab?: (tab: string) => void;
     teamsLabel?: string;
 }
@@ -72,6 +75,7 @@ const navItems = [
 
 const projectItems = [
     { icon: BarChart3, label: "Backlog Growth", id: "backlog-growth" },
+    { icon: PieChart, label: "Client Dashboard", id: "client-dashboard" },
 ];
 
 export function Sidebar({
@@ -79,11 +83,13 @@ export function Sidebar({
     clientOptions = [],
     selectedListId = null,
     selectedFolderId = null,
+    selectedClientId = null,
     activeTab = "issues",
     weekStr = "",
     assigneeFilter = null,
     onSelectList = () => { },
     onSelectFolder = () => { },
+    onSelectClient = () => { },
     onSelectTab = () => { },
     teamsLabel = "Teams",
 }: SidebarProps) {

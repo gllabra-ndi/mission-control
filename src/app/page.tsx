@@ -45,7 +45,7 @@ function normalizeConsultantNameKey(value: string) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-export default async function DashboardPage({ searchParams }: { searchParams: { week?: string; tab?: string; listId?: string; folderId?: string; assignee?: string } }) {
+export default async function DashboardPage({ searchParams }: { searchParams: { week?: string; tab?: string; listId?: string; folderId?: string; assignee?: string; clientId?: string } }) {
     await requireAppSession();
 
     // Await searchParams for Next.js 15 compatibility, but fallback safely
@@ -73,6 +73,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
             ? sp.folderId.trim()
             : null;
     const initialAssigneeFilter = typeof sp?.assignee === "string" && sp.assignee.trim().length > 0 ? sp.assignee.trim() : null;
+    const initialSelectedClientId = typeof sp?.clientId === "string" && sp.clientId.trim().length > 0 ? sp.clientId.trim() : null;
     const previousWeekStartStr = format(addWeeks(new Date(startMs), -1), "yyyy-MM-dd");
     const activeYear = new Date(startMs).getFullYear();
     const yearStartMs = new Date(activeYear, 0, 1).getTime();
@@ -333,6 +334,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
             initialTab={initialTab}
             initialSelectedListId={initialSelectedListId}
             initialSelectedFolderId={initialSelectedFolderId}
+            initialSelectedClientId={initialSelectedClientId}
             initialAssigneeFilter={initialAssigneeFilter}
             initialTaskPlannedRollups={initialTaskPlannedRollups}
             initialTaskBillableRollups={initialTaskBillableRollups}
