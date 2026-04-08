@@ -169,6 +169,32 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
 
     let allTasks: ClickUpTask[] = [];
 
+    const trimTask = (t: any): ClickUpTask => ({
+        id: String(t.id),
+        name: String(t.name),
+        status: { 
+            status: String(t.status?.status || ""), 
+            color: String(t.status?.color || ""), 
+            type: String(t.status?.type || "") 
+        },
+        date_created: String(t.date_created || ""),
+        date_updated: String(t.date_updated || ""),
+        date_closed: t.date_closed ? String(t.date_closed) : null,
+        due_date: t.due_date ? String(t.due_date) : null,
+        start_date: t.start_date ? String(t.start_date) : null,
+        assignees: (t.assignees || []).map((a: any) => ({ 
+            id: Number(a.id), 
+            username: String(a.username || ""), 
+            color: String(a.color || "") 
+        })),
+        time_estimate: t.time_estimate ? Number(t.time_estimate) : null,
+        time_spent: t.time_spent ? Number(t.time_spent) : null,
+        list: { id: String(t.list?.id || ""), name: String(t.list?.name || "") },
+        project: { id: String(t.project?.id || ""), name: String(t.project?.name || "") },
+        folder: { id: String(t.folder?.id || ""), name: String(t.folder?.name || "") },
+        space: { id: String(t.space?.id || "") }
+    });
+
     try {
         // Speculatively fetch the first 10 pages in parallel to significantly reduce load time
         const maxPages = 10;
@@ -181,9 +207,9 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
             if (res.error || !res.tasks) {
                 break;
             }
-            const currentTasks = res.tasks as ClickUpTask[];
+            const currentTasks = res.tasks as any[];
             if (currentTasks.length > 0) {
-                allTasks = [...allTasks, ...currentTasks];
+                allTasks = [...allTasks, ...currentTasks.map(trimTask)];
             }
             if (currentTasks.length < 100) {
                 // We reached the end of the tasks
@@ -198,9 +224,9 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
             const res = await fetchWithAuth(`/team/${TEAM_ID}/task?page=${page}&subtasks=true&include_closed=true`);
             if (res.error || !res.tasks) break;
             
-            const currentTasks = res.tasks as ClickUpTask[];
+            const currentTasks = res.tasks as any[];
             if (currentTasks.length > 0) {
-                allTasks = [...allTasks, ...currentTasks];
+                allTasks = [...allTasks, ...currentTasks.map(trimTask)];
             }
             lastBatchLength = currentTasks.length;
             page++;
