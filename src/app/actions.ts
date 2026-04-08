@@ -2231,7 +2231,97 @@ export async function copyConsultantUtilizationFromPriorWeek(week: string, consu
     };
 }
 
+export async function getDashboardDbData(params: {
+    weekStartStr: string;
+    previousWeekStartStr: string;
+    baseWeekStartStr: string;
+    activeYear: number;
+}) {
+    const { weekStartStr, previousWeekStartStr, baseWeekStartStr, activeYear } = params;
+    const yearPrefix = `${activeYear}-`;
+
+    const [
+        weekConfig,
+        weekConfigsForYear,
+        leadConfigsRaw,
+        clientConfigsRaw,
+        consultantConfigsRaw,
+        clientDirectory,
+        consultantsRaw,
+        appUsersRaw,
+        consultantConfigsForYear,
+        capacityGridConfigsForYear,
+        sidebarStructure,
+        plannedRollups,
+        billableRollupsCurrent,
+        billableRollupsPrevious,
+    ] = await Promise.all([
+        prisma.weekConfig.findUnique({ where: { week: weekStartStr } }),
+        prisma.weekConfig.findMany({ where: { week: { startsWith: yearPrefix } } }),
+        prisma.leadConfig.findMany({ where: { week: { in: [weekStartStr, previousWeekStartStr, baseWeekStartStr] } } }),
+        prisma.clientConfig.findMany({ where: { week: { in: [weekStartStr, previousWeekStartStr, baseWeekStartStr] } } }),
+        prisma.consultantConfig.findMany({ where: { week: { in: [weekStartStr, previousWeekStartStr, baseWeekStartStr] } } }),
+        loadClientDirectoryRecords(),
+        prisma.consultant.findMany({ orderBy: [{ firstName: "asc" }, { lastName: "asc" }, { email: "asc" }] }),
+        prisma.appUser.findMany({ where: { status: { not: "disabled" } }, select: { email: true } }),
+        prisma.consultantConfig.findMany({ where: { week: { startsWith: yearPrefix } } }),
+        prisma.capacityGridConfig.findMany({ where: { week: { startsWith: yearPrefix } } }),
+        getTaskSidebarStructure(),
+        getEditableTaskPlannedRollups(weekStartStr),
+        getEditableTaskBillableRollups(weekStartStr),
+        getEditableTaskBillableRollups(previousWeekStartStr),
+    ]);
+
+    // Post-process raw results
+    const leadConfigs = leadConfigsRaw.filter(c => c.week === weekStartStr);
+    const previousLeadConfigs = leadConfigsRaw.filter(c => c.week === previousWeekStartStr);
+    
+    const clientConfigs = clientConfigsRaw.filter(c => c.week === weekStartStr);
+    const previousClientConfigs = clientConfigsRaw.filter(c => c.week === previousWeekStartStr);
+    const baseClientConfigs = clientConfigsRaw.filter(c => c.week === baseWeekStartStr);
+
+    const consultantConfigs = consultantConfigsRaw.filter(c => c.week === weekStartStr);
+    const previousConsultantConfigs = consultantConfigsRaw.filter(c => c.week === previousWeekStartStr);
+    const baseConsultantConfigs = consultantConfigsRaw.filter(c => c.week === baseWeekStartStr);
+
+    const savedConsultants = consultantsRaw.map((row) => ({
+        id: Number(row.id),
+        firstName: String(row.firstName ?? "").trim(),
+        lastName: String(row.lastName ?? "").trim(),
+        email: String(row.email ?? "").trim(),
+        fullName: formatConsultantName(String(row.firstName ?? ""), String(row.lastName ?? "")),
+        source: String(row.source ?? "manual"),
+        externalId: row.externalId ? String(row.externalId) : null,
+    }));
+
+    const provisionedEmails = new Set(appUsersRaw.map(u => normalizeEmail(u.email)).filter(Boolean));
+    const activeConsultants = savedConsultants.filter(c => provisionedEmails.has(normalizeEmail(c.email)));
+
+    return {
+        weekConfig,
+        weekConfigsForYear,
+        leadConfigs,
+        previousLeadConfigs,
+        clientConfigs,
+        previousClientConfigs,
+        baseClientConfigs,
+        consultantConfigs,
+        previousConsultantConfigs,
+        baseConsultantConfigs,
+        clientDirectory,
+        savedConsultants,
+        activeConsultants,
+        consultantConfigsForYear,
+        capacityGridConfigsForYear,
+        sidebarStructure,
+        plannedRollups,
+        billableRollupsCurrent,
+        billableRollupsPrevious,
+    };
+}
+
 export async function loadDashboardWeekData(
+
     week: string,
     consultants?: CapacityGridConsultant[] | string[]
 ) {
