@@ -210,6 +210,84 @@ export interface EditableTaskPlannedRollupRecord {
     sourceTaskId?: string | null;
 }
 
+const DASHBOARD_BASE_CONFIG_WEEK = "2026-03-02";
+
+function mergeDashboardClientConfigs(baseRows: any[], weekRows: any[]) {
+    const baseById = new Map<string, any>();
+    baseRows.forEach((row: any) => {
+        baseById.set(String(row.clientId), row);
+    });
+
+    const weekById = new Map<string, any>();
+    weekRows.forEach((row: any) => {
+        weekById.set(String(row.clientId), row);
+    });
+
+    const merged: any[] = [];
+    baseById.forEach((baseRow, clientId) => {
+        const weekRow = weekById.get(clientId);
+        merged.push({
+            ...baseRow,
+            ...(weekRow || {}),
+            clientId,
+            orderIndex: weekRow?.orderIndex ?? baseRow.orderIndex ?? 0,
+            clientName: weekRow?.clientName || baseRow.clientName || clientId,
+        });
+        weekById.delete(clientId);
+    });
+
+    weekById.forEach((row) => {
+        merged.push({
+            ...row,
+            clientId: String(row.clientId),
+            clientName: row.clientName || String(row.clientId),
+            orderIndex: row.orderIndex ?? 9999,
+        });
+    });
+
+    return merged.sort((a, b) => {
+        const ao = Number(a.orderIndex ?? 9999);
+        const bo = Number(b.orderIndex ?? 9999);
+        if (ao !== bo) return ao - bo;
+        return String(a.clientName || a.clientId).localeCompare(String(b.clientName || b.clientId));
+    });
+}
+
+function resolveDashboardClientConfigs(
+    clientDirectory: any[],
+    baseClientConfigs: any[],
+    weekClientConfigs: any[]
+) {
+    const activeClientIds = new Set(
+        (Array.isArray(clientDirectory) ? clientDirectory : [])
+            .filter((client: any) => client?.isActive)
+            .map((client: any) => String(client.id))
+    );
+    const clientDirectoryById = new Map(
+        (Array.isArray(clientDirectory) ? clientDirectory : [])
+            .map((client: any) => [String(client.id), client] as const)
+    );
+
+    return mergeDashboardClientConfigs(baseClientConfigs, weekClientConfigs)
+        .map((row) => {
+            const client = clientDirectoryById.get(String(row.clientId));
+            if (!client) return row;
+            return {
+                ...row,
+                clientName: client.name || row.clientName,
+                team: client.team ?? row.team,
+                sa: client.sa || row.sa,
+                dealType: client.dealType || row.dealType,
+                min: client.min ?? row.min,
+                max: client.max ?? row.max,
+                isActive: client.isActive,
+                isInternal: client.isInternal,
+                orderIndex: client.sortOrder ?? row.orderIndex ?? 0,
+            };
+        })
+        .filter((row) => activeClientIds.size === 0 || activeClientIds.has(String(row.clientId)));
+}
+
 export interface TaskSidebarFolderRecord {
     id: string;
     name: string;
@@ -2332,6 +2410,8 @@ export async function loadDashboardWeekData(
         clientConfigs,
         clientDirectory,
         consultantConfigs,
+        baseClientConfigs,
+        baseConsultantConfigs,
         previousLeadConfigs,
         previousClientConfigs,
         previousConsultantConfigs,
@@ -2345,6 +2425,8 @@ export async function loadDashboardWeekData(
         getClientConfigs(week),
         getClientDirectory(),
         getConsultantConfigs(week),
+        getClientConfigs(DASHBOARD_BASE_CONFIG_WEEK),
+        getConsultantConfigs(DASHBOARD_BASE_CONFIG_WEEK),
         getLeadConfigs(previousWeek),
         getClientConfigs(previousWeek),
         getConsultantConfigs(previousWeek),
@@ -2354,12 +2436,21 @@ export async function loadDashboardWeekData(
         getEditableTaskBillableRollups(previousWeek),
     ]);
 
+    const resolvedClientConfigs = resolveDashboardClientConfigs(
+        Array.isArray(clientDirectory) ? clientDirectory : [],
+        Array.isArray(baseClientConfigs) ? baseClientConfigs : [],
+        Array.isArray(clientConfigs) ? clientConfigs : []
+    );
+    const resolvedConsultantConfigs = Array.isArray(consultantConfigs) && consultantConfigs.length > 0
+        ? consultantConfigs
+        : baseConsultantConfigs;
+
     return {
         weekConfig,
         leadConfigs,
-        clientConfigs,
+        clientConfigs: resolvedClientConfigs,
         clientDirectory,
-        consultantConfigs,
+        consultantConfigs: resolvedConsultantConfigs,
         previousLeadConfigs,
         previousClientConfigs,
         previousConsultantConfigs,
@@ -2812,7 +2903,6 @@ export async function addEditableTaskBillableEntry(input: {
     entryDate: string;
     hours: number;
     note?: string;
-    isValueAdd?: boolean;
 }) {
     const taskBillableEntryModel = (prisma as any).taskBillableEntry;
     const editableTaskModel = (prisma as any).editableTask;
@@ -2829,7 +2919,6 @@ export async function addEditableTaskBillableEntry(input: {
             entryDate,
             hours,
             note: String(input.note ?? ""),
-            isValueAdd: Boolean(input.isValueAdd ?? false),
         },
     });
 
@@ -2858,7 +2947,6 @@ export async function addEditableTaskBillableEntry(input: {
 export async function updateEditableTaskBillableEntry(
     entryId: string,
     data: Partial<{
-        isValueAdd: boolean;
         note: string;
         hours: number;
         entryDate: string;
@@ -2874,7 +2962,6 @@ export async function updateEditableTaskBillableEntry(
     if (!existing) return null;
 
     const updateData: Record<string, unknown> = {};
-    if (typeof data.isValueAdd === "boolean") updateData.isValueAdd = data.isValueAdd;
     if (typeof data.note === "string") updateData.note = data.note;
     if (typeof data.entryDate === "string" && data.entryDate.trim().length > 0) updateData.entryDate = data.entryDate.trim();
     if (typeof data.hours === "number" && Number.isFinite(data.hours)) updateData.hours = data.hours;

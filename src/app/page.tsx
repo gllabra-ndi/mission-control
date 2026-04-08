@@ -1,21 +1,8 @@
 import {
-    getWeekConfig,
-    getWeekConfigsForYear,
-    getLeadConfigs,
-    getClientConfigs,
-    getClientDirectory,
-    getConsultantConfigs,
-    getConsultantUtilizationDirectory,
     getCapacityGridConfig,
-    getConsultantConfigsForYear,
-    getCapacityGridConfigsForYear,
-    getEditableTaskBillableRollups,
-    getEditableTaskPlannedRollups,
-    getTaskSidebarStructure,
     getDashboardDbData
 } from "@/app/actions";
 import { requireAppSession } from "@/lib/auth";
-import { Suspense } from "react";
 import { addDays, addWeeks, endOfYear, format, startOfWeek } from "date-fns";
 import {
     getTeamTasks,
@@ -32,16 +19,21 @@ function normalizeConsultantNameKey(value: string) {
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // Increase Vercel timeout to 5 minutes to prevent streaming from being aborted
 
-function DashboardSkeleton() {
-    return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-50">
-            <div className="flex flex-col items-center space-y-4">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-                <p className="text-slate-600 font-medium">Loading Mission Control...</p>
-            </div>
-        </div>
-    );
-}
+const CANONICAL_2026_WEEK_DATA: Record<string, { totalHours: number; vsTarget: number; vsStretch: number }> = {
+    W02: { totalHours: 235.3, vsTarget: -114.8, vsStretch: -164.8 },
+    W03: { totalHours: 230.0, vsTarget: -120.0, vsStretch: -170.0 },
+    W04: { totalHours: 266.5, vsTarget: -83.5, vsStretch: -133.5 },
+    W05: { totalHours: 321.1, vsTarget: -28.9, vsStretch: -78.9 },
+    W06: { totalHours: 282.0, vsTarget: -68.0, vsStretch: -118.0 },
+    W07: { totalHours: 321.0, vsTarget: -29.0, vsStretch: -79.0 },
+    W08: { totalHours: 298.3, vsTarget: -51.8, vsStretch: -101.8 },
+    W09: { totalHours: 314.8, vsTarget: -35.3, vsStretch: -85.3 },
+    W10: { totalHours: 380.5, vsTarget: 30.5, vsStretch: -19.5 },
+    W11: { totalHours: 445.8, vsTarget: 45.8, vsStretch: -54.3 },
+    W12: { totalHours: 428.0, vsTarget: 28.0, vsStretch: -72.0 },
+    W13: { totalHours: 412.9, vsTarget: 12.9, vsStretch: -87.1 },
+    W14: { totalHours: 407.5, vsTarget: 7.5, vsStretch: -92.5 },
+};
 
 export default async function DashboardPage({ searchParams }: { searchParams: { week?: string; tab?: string; listId?: string; folderId?: string; assignee?: string } }) {
     await requireAppSession();
@@ -60,8 +52,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     }
 
     const startMs = startOfWeek(referenceDate, { weekStartsOn: 1 }).getTime();
-    const endMs = addDays(new Date(startMs), 6).getTime();
-
     const weekStartStr = format(startMs, 'yyyy-MM-dd');
     const initialTab = String(sp?.tab || "");
     const initialSelectedListId = typeof sp?.listId === "string" && sp.listId.trim().length > 0 ? sp.listId.trim() : null;
@@ -151,16 +141,58 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         });
     });
 
+    const validYearTimeEntries = await initialTimeEntriesPromise;
+    const timeByWeekStart = new Map<string, number>();
+    validYearTimeEntries.forEach((entry: any) => {
+        const entryStart = Number(entry?.start || 0);
+        if (!entryStart) return;
+        const wk = startOfWeek(new Date(entryStart), { weekStartsOn: 1 });
+        const key = format(wk, "yyyy-MM-dd");
+        const hrs = (Number(entry.duration) || 0) / (1000 * 60 * 60);
+        timeByWeekStart.set(key, (timeByWeekStart.get(key) || 0) + hrs);
+    });
+    const currentWeekStartKey = format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
+    const currentWeekActualHours = Number((timeByWeekStart.get(currentWeekStartKey) || 0).toFixed(1));
     const getFirstMonday = (year: number) => {
         const d = new Date(year, 0, 1);
         while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
         return d;
     };
 
-    const weeklyTrend: any[] = []; // We'll compute this in the client or pass it if possible
-    // Actually, timeByWeekStart depends on initialTimeEntries which is a promise now.
-    // I'll move the trend calculation to the client or handle it better.
-    // For now, let's keep it simple and see if we can move some logic to DashboardClient.
+    const weeklyTrend: Array<{
+        weekStart: string;
+        weekLabel: string;
+        periodLabel: string;
+        totalHours: number;
+        baseTarget: number;
+        stretchTarget: number;
+        vsTarget?: number;
+        vsStretch?: number;
+    }> = [];
+
+    let cursor = getFirstMonday(activeYear);
+    const yearEnd = endOfYear(new Date(activeYear, 0, 1));
+    while (cursor <= yearEnd) {
+        const weekStartKey = format(cursor, "yyyy-MM-dd");
+        const baseTargetForWeek = weekConfigByStart.get(weekStartKey)?.baseTarget ?? 350;
+        const stretchTargetForWeek = weekConfigByStart.get(weekStartKey)?.stretchTarget ?? 400;
+        const weekLabel = `W${format(cursor, "II")}`;
+        const canonicalData = activeYear === 2026 ? CANONICAL_2026_WEEK_DATA[weekLabel] : undefined;
+        const resolvedTotalHours = weekStartKey >= currentWeekStartKey
+            ? currentWeekActualHours
+            : Number((canonicalData?.totalHours ?? (timeByWeekStart.get(weekStartKey) || 0)).toFixed(1));
+        weeklyTrend.push({
+            weekStart: weekStartKey,
+            weekLabel,
+            periodLabel: `${format(cursor, "MM/dd")} to ${format(addDays(cursor, 4), "MM/dd")}`,
+            totalHours: resolvedTotalHours,
+            baseTarget: Number(baseTargetForWeek.toFixed(1)),
+            stretchTarget: Number(stretchTargetForWeek.toFixed(1)),
+            vsTarget: canonicalData?.vsTarget,
+            vsStretch: canonicalData?.vsStretch,
+        });
+        cursor = addWeeks(cursor, 1);
+    }
 
     const mergeClientConfigs = (baseRows: any[], weekRows: any[]) => {
         const baseById = new Map<string, any>();
@@ -248,7 +280,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
             initialSidebarStructure={sidebarStructure}
             dbConfig={{
                 weekConfig,
-                weeklyTrend: [], // Move trend calculation to client or handle differently
+                weekConfigsForYear,
+                weeklyTrend,
                 leadConfigs,
                 clientConfigs: finalClientConfigs,
                 clientDirectory,

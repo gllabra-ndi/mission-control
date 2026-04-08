@@ -15,7 +15,6 @@ import { CapacityTrends } from "@/components/CapacityTrends";
 import { CapacityGridPayload, EditableTaskBillableRollupRecord, EditableTaskPlannedRollupRecord, TaskSidebarStructureRecord } from "@/app/actions";
 import { ClickUpTask, TimeEntry, PROFESSIONAL_SERVICES_SPACE_ID } from "@/lib/clickup";
 import { MissionEngineMark } from "@/components/BrandMarks";
-import { addDays, addWeeks, endOfYear, format, startOfWeek } from "date-fns";
 
 interface DashboardClientProps {
     initialTasksPromise: Promise<ClickUpTask[]>;
@@ -42,22 +41,6 @@ type DashboardExtraParams = Record<string, string | null | undefined>;
 const EMPTY_CAPACITY_GRID: CapacityGridPayload = { resources: [], rows: [] };
 const VALID_TABS = new Set(["issues", "editable-tasks", "command-center", "trends", "capacity-trends", "consultant-utilization", "timesheets", "capacity-grid", "client-setup", "backlog-growth"]);
 const normalizeTab = (tab?: string) => (tab && VALID_TABS.has(tab) ? tab : "command-center");
-
-const CANONICAL_2026_WEEK_DATA: Record<string, { totalHours: number; vsTarget: number; vsStretch: number }> = {
-    W02: { totalHours: 235.3, vsTarget: -114.8, vsStretch: -164.8 },
-    W03: { totalHours: 230.0, vsTarget: -120.0, vsStretch: -170.0 },
-    W04: { totalHours: 266.5, vsTarget: -83.5, vsStretch: -133.5 },
-    W05: { totalHours: 321.1, vsTarget: -28.9, vsStretch: -78.9 },
-    W06: { totalHours: 282.0, vsTarget: -68.0, vsStretch: -118.0 },
-    W07: { totalHours: 321.0, vsTarget: -29.0, vsStretch: -79.0 },
-    W08: { totalHours: 298.3, vsTarget: -51.8, vsStretch: -101.8 },
-    W09: { totalHours: 314.8, vsTarget: -35.3, vsStretch: -85.3 },
-    W10: { totalHours: 380.5, vsTarget: 30.5, vsStretch: -19.5 },
-    W11: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W12: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W13: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W14: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-};
 
 function SidebarSkeleton() {
     return (
@@ -417,7 +400,6 @@ function ContentTabs({
             {activeTab === "trends" && (
                 <section className="flex-1 flex flex-col min-h-[400px]">
                     <TrendsTabStream
-                        initialTimeEntriesPromise={initialTimeEntriesPromise}
                         activeWeekStrState={activeWeekStrState}
                         dbConfig={dbConfig}
                         handleWeekChange={handleWeekChange}
@@ -530,59 +512,10 @@ function IssuesTabStream({ initialTasksPromise, activeWeekStrState, activeConsul
     );
 }
 
-function TrendsTabStream({ initialTimeEntriesPromise, activeWeekStrState, dbConfig, handleWeekChange }: { initialTimeEntriesPromise: Promise<TimeEntry[]>, activeWeekStrState: string, dbConfig: any, handleWeekChange: (w: string) => void }) {
-    const timeEntries = use(initialTimeEntriesPromise);
+function TrendsTabStream({ activeWeekStrState, dbConfig, handleWeekChange }: { activeWeekStrState: string, dbConfig: any, handleWeekChange: (w: string) => void }) {
     const weeklyTrend = useMemo(() => {
-        const activeYear = new Date(activeWeekStrState).getFullYear();
-        const weekConfigByStart = new Map<string, { baseTarget: number, stretchTarget: number }>();
-        const weekConfigsForYear = Array.isArray(dbConfig?.weekConfigsForYear) ? dbConfig.weekConfigsForYear : [];
-        
-        weekConfigsForYear.forEach((cfg: any) => {
-            weekConfigByStart.set(cfg.week, {
-                baseTarget: Number(cfg.baseTarget ?? 350),
-                stretchTarget: Number(cfg.stretchTarget ?? 400)
-            });
-        });
-
-        const timeByWeekStart = new Map<string, number>();
-        (timeEntries || []).forEach((entry: any) => {
-            const entryStart = Number(entry?.start || 0);
-            if (!entryStart) return;
-            const wk = startOfWeek(new Date(entryStart), { weekStartsOn: 1 });
-            const key = format(wk, "yyyy-MM-dd");
-            const hrs = (Number(entry.duration) || 0) / (1000 * 60 * 60);
-            timeByWeekStart.set(key, (timeByWeekStart.get(key) || 0) + hrs);
-        });
-
-        const getFirstMonday = (year: number) => {
-            const d = new Date(year, 0, 1);
-            while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
-            return d;
-        };
-
-        const trend: any[] = [];
-        let cursor = getFirstMonday(activeYear);
-        const yearEnd = endOfYear(new Date(activeYear, 0, 1));
-        while (cursor <= yearEnd) {
-            const weekStartKey = format(cursor, "yyyy-MM-dd");
-            const baseTargetForWeek = weekConfigByStart.get(weekStartKey)?.baseTarget ?? 350;
-            const stretchTargetForWeek = weekConfigByStart.get(weekStartKey)?.stretchTarget ?? 400;
-            const weekLabel = `W${format(cursor, "II")}`;
-            const canonicalData = activeYear === 2026 ? CANONICAL_2026_WEEK_DATA[weekLabel] : undefined;
-            trend.push({
-                weekStart: weekStartKey,
-                weekLabel,
-                periodLabel: `${format(cursor, "MM/dd")} to ${format(addDays(cursor, 4), "MM/dd")}`,
-                totalHours: Number((canonicalData?.totalHours ?? (timeByWeekStart.get(weekStartKey) || 0)).toFixed(1)),
-                baseTarget: Number(baseTargetForWeek.toFixed(1)),
-                stretchTarget: Number(stretchTargetForWeek.toFixed(1)),
-                vsTarget: canonicalData?.vsTarget,
-                vsStretch: canonicalData?.vsStretch,
-            });
-            cursor = addWeeks(cursor, 1);
-        }
-        return trend;
-    }, [timeEntries, activeWeekStrState, dbConfig?.weekConfigsForYear]);
+        return Array.isArray(dbConfig?.weeklyTrend) ? dbConfig.weeklyTrend : [];
+    }, [dbConfig?.weeklyTrend]);
 
     return (
         <Trends

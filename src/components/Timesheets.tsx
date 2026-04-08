@@ -48,7 +48,6 @@ type TimesheetTaskRow = {
 type TimesheetCellDraft = {
     hours: string;
     note: string;
-    isValueAdd: boolean;
 };
 
 type TimesheetCellNoteEditorState = {
@@ -57,7 +56,6 @@ type TimesheetCellNoteEditorState = {
     taskSubject: string;
     dateLabel: string;
     note: string;
-    isValueAdd: boolean;
 };
 
 type ClientGroup = {
@@ -346,7 +344,6 @@ export function Timesheets({
                     draft[weekday.key] = currentDraft ?? {
                         hours: formatInputHours(row.dayHoursByDate[weekday.key] ?? 0),
                         note: String(primaryEntry?.note ?? ""),
-                        isValueAdd: Boolean(primaryEntry?.isValueAdd ?? false),
                     };
                     return draft;
                 }, {});
@@ -414,7 +411,7 @@ export function Timesheets({
             [taskId]: {
                 ...(prev[taskId] ?? {}),
                 [dateKey]: {
-                    ...(prev[taskId]?.[dateKey] ?? { note: "", isValueAdd: false }),
+                    ...(prev[taskId]?.[dateKey] ?? { note: "" }),
                     hours: cleaned,
                 },
             },
@@ -447,7 +444,7 @@ export function Timesheets({
             [taskId]: {
                 ...(prev[taskId] ?? {}),
                 [dateKey]: {
-                    ...(prev[taskId]?.[dateKey] ?? { note: "", isValueAdd: false }),
+                    ...(prev[taskId]?.[dateKey] ?? { note: "" }),
                     hours: formatInputHours(suggestedHours),
                 },
             },
@@ -463,7 +460,6 @@ export function Timesheets({
             taskSubject: row.task.subject,
             dateLabel: weekday ? `${weekday.shortLabel} ${weekday.dateLabel}` : dateKey,
             note: String(draft?.note ?? ""),
-            isValueAdd: Boolean(draft?.isValueAdd ?? false),
         });
     };
 
@@ -476,7 +472,6 @@ export function Timesheets({
                 [noteEditor.dateKey]: {
                     ...(prev[noteEditor.taskId]?.[noteEditor.dateKey] ?? { hours: "" }),
                     note: noteEditor.note,
-                    isValueAdd: noteEditor.isValueAdd,
                 },
             },
         }));
@@ -490,11 +485,9 @@ export function Timesheets({
             const currentValue = Number(row.dayHoursByDate[weekday.key] ?? 0);
             const currentEntry = row.dayPrimaryEntryByDate[weekday.key];
             const currentNote = String(currentEntry?.note ?? "");
-            const currentIsValueAdd = Boolean(currentEntry?.isValueAdd ?? false);
             return (
                 Math.abs(draftValue - currentValue) > 0.01
                 || String(draft?.note ?? "") !== currentNote
-                || Boolean(draft?.isValueAdd ?? false) !== currentIsValueAdd
             );
         });
     };
@@ -517,11 +510,9 @@ export function Timesheets({
                     const currentTotal = Number(getDayHours(currentEntries).toFixed(2));
                     const primaryEntry = row.dayPrimaryEntryByDate[weekday.key];
                     const note = String(draft?.note ?? "");
-                    const isValueAdd = Boolean(draft?.isValueAdd ?? false);
                     const noteChanged = note !== String(primaryEntry?.note ?? "");
-                    const valueAddChanged = isValueAdd !== Boolean(primaryEntry?.isValueAdd ?? false);
                     const hoursChanged = Math.abs(targetHours - currentTotal) > 0.01;
-                    if (!hoursChanged && !noteChanged && !valueAddChanged) continue;
+                    if (!hoursChanged && !noteChanged) continue;
 
                     if (targetHours <= 0.01) {
                         for (const entry of currentEntries) {
@@ -536,7 +527,6 @@ export function Timesheets({
                             entryDate: weekday.key,
                             hours: targetHours,
                             note,
-                            isValueAdd,
                         });
                         continue;
                     }
@@ -546,7 +536,6 @@ export function Timesheets({
                         await updateEditableTaskBillableEntry(primary.id, {
                             hours: targetHours,
                             note,
-                            isValueAdd,
                         });
                     }
                     for (const entry of duplicates) {
@@ -715,7 +704,7 @@ export function Timesheets({
                                                     <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-text-muted">{row.task.status}</div>
                                                 </td>
                                                 {weekdays.map((weekday) => {
-                                                    const cellDraft = cellDrafts[row.task.id]?.[weekday.key] ?? { hours: "", note: "", isValueAdd: false };
+                                                    const cellDraft = cellDrafts[row.task.id]?.[weekday.key] ?? { hours: "", note: "" };
                                                     const draftValue = cellDraft.hours;
                                                     const suggestion = getSuggestedHours(group, weekday.key);
                                                     const hasExistingActuals = Number(row.dayHoursByDate[weekday.key] ?? 0) > 0.01;
@@ -724,7 +713,7 @@ export function Timesheets({
                                                             <div
                                                                 className={cn(
                                                                     "rounded-2xl border bg-background/35 p-2.5 transition-colors",
-                                                                    cellDraft.note || cellDraft.isValueAdd ? "border-primary/40" : "border-border/50"
+                                                                    cellDraft.note ? "border-primary/40" : "border-border/50"
                                                                 )}
                                                                 onDoubleClick={() => openNoteEditor(row, weekday.key)}
                                                             >
@@ -749,27 +738,6 @@ export function Timesheets({
                                                                         </button>
                                                                     )}
                                                                 </div>
-                                                                <label className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-border/40 bg-[#0f1320]/70 px-2.5 py-2 text-[10px] text-text-muted">
-                                                                    <span className="font-medium uppercase tracking-[0.16em]">Value Add</span>
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={cellDraft.isValueAdd}
-                                                                        onChange={(event) => {
-                                                                            const checked = event.target.checked;
-                                                                            setCellDrafts((prev) => ({
-                                                                                ...prev,
-                                                                                [row.task.id]: {
-                                                                                    ...(prev[row.task.id] ?? {}),
-                                                                                    [weekday.key]: {
-                                                                                        ...(prev[row.task.id]?.[weekday.key] ?? { hours: draftValue, note: "" }),
-                                                                                        isValueAdd: checked,
-                                                                                    },
-                                                                                },
-                                                                            }));
-                                                                        }}
-                                                                        className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                                                    />
-                                                                </label>
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => openNoteEditor(row, weekday.key)}
@@ -823,20 +791,11 @@ export function Timesheets({
                             </button>
                         </div>
                         <div className="space-y-4 bg-[linear-gradient(180deg,#0f1424_0%,#0d121d_100%)] p-5">
-                            <label className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-[#151a2b] px-4 py-3 text-sm text-white">
-                                <span>Value Add</span>
-                                <input
-                                    type="checkbox"
-                                    checked={noteEditor.isValueAdd}
-                                    onChange={(event) => setNoteEditor((prev) => prev ? { ...prev, isValueAdd: event.target.checked } : prev)}
-                                    className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                />
-                            </label>
                             <textarea
                                 value={noteEditor.note}
                                 onChange={(event) => setNoteEditor((prev) => prev ? { ...prev, note: event.target.value } : prev)}
                                 rows={10}
-                                placeholder="Add timesheet context, blockers, follow-ups, or value-add detail for this day."
+                                placeholder="Add timesheet context, blockers, or follow-up detail for this day."
                                 className="min-h-[240px] w-full resize-none rounded-xl border border-border/60 bg-[#0f1320] px-4 py-4 text-sm leading-7 text-white outline-none placeholder:text-text-muted focus:border-border/80"
                                 autoFocus
                             />

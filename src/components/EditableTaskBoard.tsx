@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, useTransition, type FocusEvent } from "react";
 import { useRouter } from "next/navigation";
 import { addDays, addWeeks, format, startOfWeek, subWeeks } from "date-fns";
-import { ChevronLeft, ChevronRight, GripVertical, Paperclip, Plus, Save, Trash2, Upload, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, GripVertical, Plus, Save, Trash2, Upload, X } from "lucide-react";
 import {
     addEditableTaskBillableEntry,
     createEditableTask,
@@ -67,7 +67,6 @@ type BillableEntryDraft = {
     entryDate: string;
     hours: string;
     note: string;
-    isValueAdd: boolean;
 };
 
 const STATUS_COLUMNS: Array<{ id: EditableStatus; label: string }> = [
@@ -247,7 +246,6 @@ export function EditableTaskBoard({
         entryDate: getDefaultBillableEntryDate(activeWeekStr),
         hours: "",
         note: "",
-        isValueAdd: false,
     });
     const [dragTaskId, setDragTaskId] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
@@ -322,7 +320,6 @@ export function EditableTaskBoard({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
             hours: "",
             note: "",
-            isValueAdd: false,
         });
     }, [selectedTaskId, boardTasks, activeWeekStr]);
 
@@ -541,7 +538,6 @@ export function EditableTaskBoard({
             entryDate: billableEntryDraft.entryDate,
             hours: normalizeEstimateHours(billableEntryDraft.hours),
             note: billableEntryDraft.note,
-            isValueAdd: billableEntryDraft.isValueAdd,
         });
         if (!created) return;
 
@@ -560,7 +556,6 @@ export function EditableTaskBoard({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
             hours: "",
             note: "",
-            isValueAdd: false,
         });
         await onWeekDataRefresh?.();
     };
@@ -582,21 +577,6 @@ export function EditableTaskBoard({
         if (editorState?.id === task.id) {
             setEditorState((prev) => prev ? { ...prev, isAi: nextValue } : prev);
         }
-    };
-
-    const handleToggleBillableValueAdd = async (entry: EditableTaskBillableEntryRecord, nextValue: boolean) => {
-        setBoardTasks((prev) => prev.map((task) => {
-            if (task.id !== entry.taskId) return task;
-            return {
-                ...task,
-                billableEntries: (task.billableEntries || []).map((item) => (
-                    item.id === entry.id ? { ...item, isValueAdd: nextValue } : item
-                )),
-            };
-        }));
-
-        await updateEditableTaskBillableEntry(entry.id, { isValueAdd: nextValue });
-        await onWeekDataRefresh?.();
     };
 
     const handleAttachmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -864,7 +844,7 @@ export function EditableTaskBoard({
                         >
                             <div className="min-w-0">
                                 <div className="flex items-center gap-2 text-sm font-medium text-white">
-                                    <Paperclip className="h-3.5 w-3.5 shrink-0 text-text-muted" />
+                                    <Upload className="h-3.5 w-3.5 shrink-0 text-text-muted" />
                                     <a
                                         href={attachment.downloadUrl}
                                         target="_blank"
@@ -930,7 +910,7 @@ export function EditableTaskBoard({
                     Logged actuals here will roll up into Plan vs Actuals for this consultant and client.
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-[160px_120px_minmax(0,1fr)_160px_auto]">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-[160px_120px_minmax(0,1fr)_auto]">
                     <label className="block space-y-1">
                         <span className="text-[11px] uppercase tracking-wider text-text-muted">Date</span>
                         <input
@@ -972,17 +952,6 @@ export function EditableTaskBoard({
                             className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                         />
                     </label>
-                    <label className="flex items-end">
-                        <span className="flex w-full items-center gap-3 rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white">
-                            <input
-                                type="checkbox"
-                                checked={billableEntryDraft.isValueAdd}
-                                onChange={(event) => setBillableEntryDraft((prev) => ({ ...prev, isValueAdd: event.target.checked }))}
-                                className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                            />
-                            <span>Value Add</span>
-                        </span>
-                    </label>
                     <div className="flex items-end">
                         <button
                             type="button"
@@ -1012,16 +981,7 @@ export function EditableTaskBoard({
                                     <div className="text-sm font-medium text-white">
                                         {entry.hours.toFixed(2)}h on {format(new Date(`${entry.entryDate}T00:00:00`), "MMM d, yyyy")}
                                     </div>
-                                    <label className="mt-2 inline-flex items-center gap-2 text-xs text-text-muted">
-                                        <input
-                                            type="checkbox"
-                                            checked={Boolean(entry.isValueAdd)}
-                                            onChange={(event) => handleToggleBillableValueAdd(entry, event.target.checked)}
-                                            className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                        />
-                                        <span>Value Add</span>
-                                    </label>
-                                    <div className="mt-1 text-xs text-text-muted">
+                                    <div className="mt-2 text-xs text-text-muted">
                                         {entry.note || "No note"}
                                     </div>
                                 </div>
