@@ -233,38 +233,37 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     let finalConsultantConfigs = consultantConfigs.length > 0 ? consultantConfigs : baseConsultantConfigs;
 
     return (
-        <Suspense fallback={<DashboardSkeleton />}>
-            <DashboardClient
-                initialTasksPromise={initialTasksPromise}
-                initialFoldersPromise={initialFoldersPromise}
-                initialTimeEntriesPromise={initialTimeEntriesPromise}
-                weekStartStr={weekStartStr}
-                initialTab={initialTab}
-                initialSelectedListId={initialSelectedListId}
-                initialSelectedFolderId={initialSelectedFolderId}
-                initialAssigneeFilter={initialAssigneeFilter}
-                initialTaskPlannedRollups={plannedRollups}
-                initialTaskBillableRollups={billableRollupsCurrent}
-                initialSidebarStructure={sidebarStructure}
-                dbConfig={{
-                    weekConfig,
-                    weeklyTrend: [], // Move trend calculation to client or handle differently
-                    leadConfigs,
-                    clientConfigs: finalClientConfigs,
-                    clientDirectory,
-                    consultants: consultantRoster,
-                    consultantConfigs: finalConsultantConfigs,
-                    capacityGridConfig,
-                    consultantConfigsForYear,
-                    capacityGridConfigsForYear,
-                    taskPlannedRollups: plannedRollups,
-                    previousWeekStartStr,
-                    previousLeadConfigs,
-                    previousClientConfigs,
-                    previousConsultantConfigs,
-                    previousTaskBillableRollups: billableRollupsPrevious,
-                }}
-            />
-        </Suspense>
+        <DashboardClient
+            initialTasksPromise={initialTasksPromise}
+            initialFoldersPromise={initialFoldersPromise}
+            initialTimeEntriesPromise={initialTimeEntriesPromise}
+            weekStartStr={weekStartStr}
+            initialTab={initialTab}
+            initialSelectedListId={initialSelectedListId}
+            initialSelectedFolderId={initialSelectedFolderId}
+            initialAssigneeFilter={initialAssigneeFilter}
+            initialTaskPlannedRollups={plannedRollups}
+            initialTaskBillableRollups={billableRollupsCurrent}
+            initialSidebarStructure={sidebarStructure}
+            dbConfig={{
+                weekConfig,
+                weeklyTrend: [], // Move trend calculation to client or handle differently
+                leadConfigs,
+                clientConfigs: finalClientConfigs,
+                clientDirectory,
+                consultants: consultantRoster,
+                activeConsultants, // Pass activeConsultants correctly
+                consultantConfigs: finalConsultantConfigs,
+                capacityGridConfig,
+                consultantConfigsForYear,
+                capacityGridConfigsForYear,
+                taskPlannedRollups: plannedRollups,
+                previousWeekStartStr,
+                previousLeadConfigs,
+                previousClientConfigs,
+                previousConsultantConfigs,
+                previousTaskBillableRollups: billableRollupsPrevious,
+            }}
+        />
     );
 }
