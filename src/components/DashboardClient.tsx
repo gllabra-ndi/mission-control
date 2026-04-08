@@ -334,7 +334,6 @@ export function DashboardClient(props: DashboardClientProps) {
                             activeTab={resolvedActiveTab}
                             initialTasksPromise={initialTasksPromise}
                             initialTimeEntriesPromise={initialTimeEntriesPromise}
-                            initialFoldersPromise={initialFoldersPromise}
                             activeWeekStrState={activeWeekStrState}
                             dbConfig={dashboardConfigState}
                             handleWeekChange={handleWeekChange}
@@ -371,7 +370,20 @@ function SidebarStream({
     onSelectList,
     onSelectFolder,
     onSelectTab,
-}: any) {
+}: {
+    initialFoldersPromise: Promise<FolderWithLists[]>;
+    initialTasksPromise: Promise<ClickUpTask[]>;
+    initialSidebarStructure: TaskSidebarStructureRecord;
+    clientOptions: ClientOption[];
+    selectedListId: string | null;
+    selectedFolderId: string | null;
+    activeTab: string;
+    weekStr: string;
+    assigneeFilter: string | null;
+    onSelectList: (id: string | null) => void;
+    onSelectFolder: (id: string | null) => void;
+    onSelectTab: (tab: string) => void;
+}) {
     const initialFolders = use(initialFoldersPromise);
     const initialTasks = use(initialTasksPromise);
 
@@ -381,22 +393,22 @@ function SidebarStream({
 
     const availableFolders = useMemo(() => {
         const shouldExcludeList = (name: string) => /user\s*guide/i.test(name);
-        const hiddenFolderIds = new Set((initialSidebarStructure?.hiddenFolderIds ?? []).map((id: any) => String(id)));
-        const hiddenBoardIds = new Set((initialSidebarStructure?.hiddenBoardIds ?? []).map((id: any) => String(id)));
+        const hiddenFolderIds = new Set((initialSidebarStructure?.hiddenFolderIds ?? []).map((id) => String(id)));
+        const hiddenBoardIds = new Set((initialSidebarStructure?.hiddenBoardIds ?? []).map((id) => String(id)));
         const folderOverrideMap = new Map(
-            (initialSidebarStructure?.folderOverrides ?? []).map((override: any) => [
+            (initialSidebarStructure?.folderOverrides ?? []).map((override) => [
                 `${override.source}:${override.folderId}`,
                 override,
             ])
         );
         const placementMap = new Map(
-            (initialSidebarStructure?.placements ?? []).map((placement: any) => [
+            (initialSidebarStructure?.placements ?? []).map((placement) => [
                 `${placement.source}:${placement.boardId}`,
                 placement,
             ])
         );
         
-        const normalizedClientCandidates = clientOptions.map((client: any) => ({
+        const normalizedClientCandidates = clientOptions.map((client) => ({
             ...client,
             normalizedId: normalizeConsultantNameKey(client.id),
             normalizedName: normalizeConsultantNameKey(client.name),
@@ -513,12 +525,31 @@ function ContentStream({
     initialSidebarStructure,
     clientOptions,
     handleTimesheetAssigneeFilterChange,
-}: any) {
+}: {
+    activeTab: string;
+    initialTasksPromise: Promise<ClickUpTask[]>;
+    initialTimeEntriesPromise: Promise<TimeEntry[]>;
+    activeWeekStrState: string;
+    dbConfig: any;
+    handleWeekChange: (week: string) => void;
+    activeConsultantNames: string[];
+    selectedAssigneeFilterState: string | null;
+    handleAssigneeFilterChange: (assignee: string | null) => void;
+    consultantsFromDirectory: any[];
+    consultantsForRoster: any[];
+    consultantConfigsState: any;
+    capacityGridState: any;
+    taskPlannedRollupsState: any[];
+    taskBillableRollupsState: any[];
+    initialSidebarStructure: any;
+    clientOptions: any[];
+    handleTimesheetAssigneeFilterChange: (assignee: string | null) => void;
+}) {
     const initialTasks = use(initialTasksPromise);
     const initialTimeEntries = use(initialTimeEntriesPromise);
 
     const proServicesTasks = useMemo(() => {
-        return initialTasks.filter((t: any) => t.space?.id === PROFESSIONAL_SERVICES_SPACE_ID);
+        return initialTasks.filter((t) => t.space?.id === PROFESSIONAL_SERVICES_SPACE_ID);
     }, [initialTasks]);
 
     const weeklyTrend = useMemo(() => {
