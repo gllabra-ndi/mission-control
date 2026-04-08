@@ -6,8 +6,10 @@ node_modules
 .env
 .env.local
 .env.*.local
+.env.vercel
 
 # Local databases and generated artifacts
 *.db
 /src/generated/prisma
 .task-attachments
+.vercel

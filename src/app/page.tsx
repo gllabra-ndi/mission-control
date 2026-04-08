@@ -30,6 +30,7 @@ function normalizeConsultantNameKey(value: string) {
 }
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Increase Vercel timeout to 5 minutes to prevent streaming from being aborted
 
 function DashboardSkeleton() {
     return (

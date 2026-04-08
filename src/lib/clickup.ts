@@ -168,32 +168,42 @@ export async function getTeamTasks(filters?: { textSearch?: string; assigneeName
     if (!TEAM_ID) return [];
 
     let allTasks: ClickUpTask[] = [];
-    let page = 0;
-    let hasMore = true;
 
     try {
-        while (hasMore) {
-            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?page=${page}&subtasks=true&include_closed=true`);
+        // Speculatively fetch the first 10 pages in parallel to significantly reduce load time
+        const maxPages = 10;
+        const pagePromises = Array.from({ length: maxPages }).map((_, i) =>
+            fetchWithAuth(`/team/${TEAM_ID}/task?page=${i}&subtasks=true&include_closed=true`)
+        );
+        const results = await Promise.all(pagePromises);
 
-            // If error or no tasks array returned, break
+        for (const res of results) {
             if (res.error || !res.tasks) {
-                console.error("Error fetching tasks page", page, res.error);
                 break;
             }
-
             const currentTasks = res.tasks as ClickUpTask[];
-
             if (currentTasks.length > 0) {
                 allTasks = [...allTasks, ...currentTasks];
-                page++;
-
-                // ClickUp v2 returns max 100 tasks per page. If we got less, we're at the end.
-                if (currentTasks.length < 100) {
-                    hasMore = false;
-                }
-            } else {
-                hasMore = false; // Empty page means we reached the end
             }
+            if (currentTasks.length < 100) {
+                // We reached the end of the tasks
+                break;
+            }
+        }
+
+        // If we exactly hit 100 tasks on the 10th page, there might be more. Fetch the rest sequentially.
+        let page = maxPages;
+        let lastBatchLength = results[maxPages - 1]?.tasks?.length || 0;
+        while (lastBatchLength === 100) {
+            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?page=${page}&subtasks=true&include_closed=true`);
+            if (res.error || !res.tasks) break;
+            
+            const currentTasks = res.tasks as ClickUpTask[];
+            if (currentTasks.length > 0) {
+                allTasks = [...allTasks, ...currentTasks];
+            }
+            lastBatchLength = currentTasks.length;
+            page++;
         }
     } catch (err) {
         console.error("Pagination error:", err);
