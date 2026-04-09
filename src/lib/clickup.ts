@@ -164,36 +164,79 @@ export async function getSpaceFoldersWithLists(spaceId: string, excludedFolderId
 }
 
 // Fetch all tasks for a specific team with pagination to grab everything
-export async function getTeamTasks(filters?: { textSearch?: string; assigneeName?: string; status?: string }) {
+export async function getTeamTasks(filters?: { textSearch?: string; assigneeName?: string; status?: string; spaceIds?: string[]; daysBack?: number }) {
     if (!TEAM_ID) return [];
 
     let allTasks: ClickUpTask[] = [];
-    let page = 0;
-    let hasMore = true;
+
+    const trimTask = (t: any): ClickUpTask => ({
+        id: String(t.id),
+        name: String(t.name),
+        status: { 
+            status: String(t.status?.status || ""), 
+            color: String(t.status?.color || ""), 
+            type: String(t.status?.type || "") 
+        },
+        date_created: String(t.date_created || ""),
+        date_updated: String(t.date_updated || ""),
+        date_closed: t.date_closed ? String(t.date_closed) : null,
+        due_date: t.due_date ? String(t.due_date) : null,
+        start_date: t.start_date ? String(t.start_date) : null,
+        assignees: (t.assignees || []).map((a: any) => ({ 
+            id: Number(a.id), 
+            username: String(a.username || ""), 
+            color: String(a.color || "") 
+        })),
+        time_estimate: t.time_estimate ? Number(t.time_estimate) : null,
+        time_spent: t.time_spent ? Number(t.time_spent) : null,
+        list: { id: String(t.list?.id || ""), name: String(t.list?.name || "") },
+        project: { id: String(t.project?.id || ""), name: String(t.project?.name || "") },
+        folder: { id: String(t.folder?.id || ""), name: String(t.folder?.name || "") },
+        space: { id: String(t.space?.id || "") }
+    });
 
     try {
-        while (hasMore) {
-            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?page=${page}&subtasks=true&include_closed=true`);
+        const spaceIdsParam = filters?.spaceIds && filters.spaceIds.length > 0 
+            ? filters.spaceIds.map(id => `space_ids[]=${id}`).join('&')
+            : `space_ids[]=${PROFESSIONAL_SERVICES_SPACE_ID}`;
+        
+        const daysBack = filters?.daysBack ?? 60;
+        const dateUpdatedGt = Date.now() - (daysBack * 24 * 60 * 60 * 1000);
 
-            // If error or no tasks array returned, break
+        // Speculatively fetch the first 20 pages in parallel to significantly reduce load time
+        const maxPages = 20;
+        const pagePromises = Array.from({ length: maxPages }).map((_, i) =>
+            fetchWithAuth(`/team/${TEAM_ID}/task?${spaceIdsParam}&page=${i}&subtasks=true&include_closed=true&date_updated_gt=${dateUpdatedGt}`)
+        );
+        const results = await Promise.all(pagePromises);
+
+        for (const res of results) {
             if (res.error || !res.tasks) {
-                console.error("Error fetching tasks page", page, res.error);
                 break;
             }
-
-            const currentTasks = res.tasks as ClickUpTask[];
-
+            const currentTasks = res.tasks as any[];
             if (currentTasks.length > 0) {
-                allTasks = [...allTasks, ...currentTasks];
-                page++;
-
-                // ClickUp v2 returns max 100 tasks per page. If we got less, we're at the end.
-                if (currentTasks.length < 100) {
-                    hasMore = false;
-                }
-            } else {
-                hasMore = false; // Empty page means we reached the end
+                allTasks = [...allTasks, ...currentTasks.map(trimTask)];
             }
+            if (currentTasks.length < 100) {
+                // We reached the end of the tasks
+                break;
+            }
+        }
+
+        // If we exactly hit 100 tasks on the 20th page, there might be more. Fetch the rest sequentially.
+        let page = maxPages;
+        let lastBatchLength = results[maxPages - 1]?.tasks?.length || 0;
+        while (lastBatchLength === 100) {
+            const res = await fetchWithAuth(`/team/${TEAM_ID}/task?${spaceIdsParam}&page=${page}&subtasks=true&include_closed=true&date_updated_gt=${dateUpdatedGt}`);
+            if (res.error || !res.tasks) break;
+            
+            const currentTasks = res.tasks as any[];
+            if (currentTasks.length > 0) {
+                allTasks = [...allTasks, ...currentTasks.map(trimTask)];
+            }
+            lastBatchLength = currentTasks.length;
+            page++;
         }
     } catch (err) {
         console.error("Pagination error:", err);

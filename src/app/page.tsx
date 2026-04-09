@@ -1,29 +1,23 @@
 import {
+    getCapacityGridConfig,
+    getDashboardDbData
+} from "@/app/actions";
+import { requireAppSession } from "@/lib/auth";
+import { addDays, addWeeks, endOfYear, format, startOfWeek } from "date-fns";
+import {
     getTeamTasks,
     getTeamTimeEntries,
     getSpaceFoldersWithLists,
     PROFESSIONAL_SERVICES_SPACE_ID
 } from "@/lib/clickup";
 import { DashboardClient } from "@/components/DashboardClient";
-import { addDays, addWeeks, endOfYear, format, startOfWeek } from "date-fns";
-import {
-    getWeekConfig,
-    getWeekConfigsForYear,
-    getLeadConfigs,
-    getClientConfigs,
-    getClientDirectory,
-    getConsultantConfigs,
-    getConsultantUtilizationDirectory,
-    getCapacityGridConfig,
-    getConsultantConfigsForYear,
-    getCapacityGridConfigsForYear,
-    getEditableTaskBillableRollups,
-    getEditableTaskPlannedRollups,
-    getTaskSidebarStructure
-} from "@/app/actions";
-import { requireAppSession } from "@/lib/auth";
+
+function normalizeConsultantNameKey(value: string) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Increase Vercel timeout to 5 minutes to prevent streaming from being aborted
 
 const CANONICAL_2026_WEEK_DATA: Record<string, { totalHours: number; vsTarget: number; vsStretch: number }> = {
     W02: { totalHours: 235.3, vsTarget: -114.8, vsStretch: -164.8 },
@@ -35,15 +29,11 @@ const CANONICAL_2026_WEEK_DATA: Record<string, { totalHours: number; vsTarget: n
     W08: { totalHours: 298.3, vsTarget: -51.8, vsStretch: -101.8 },
     W09: { totalHours: 314.8, vsTarget: -35.3, vsStretch: -85.3 },
     W10: { totalHours: 380.5, vsTarget: 30.5, vsStretch: -19.5 },
-    W11: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W12: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W13: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
-    W14: { totalHours: 0.0, vsTarget: -350.0, vsStretch: -400.0 },
+    W11: { totalHours: 445.8, vsTarget: 45.8, vsStretch: -54.3 },
+    W12: { totalHours: 428.0, vsTarget: 28.0, vsStretch: -72.0 },
+    W13: { totalHours: 412.9, vsTarget: 12.9, vsStretch: -87.1 },
+    W14: { totalHours: 407.5, vsTarget: 7.5, vsStretch: -92.5 },
 };
-
-function normalizeConsultantNameKey(value: string) {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
 
 export default async function DashboardPage({ searchParams }: { searchParams: { week?: string; tab?: string; listId?: string; folderId?: string; assignee?: string } }) {
     await requireAppSession();
@@ -62,8 +52,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     }
 
     const startMs = startOfWeek(referenceDate, { weekStartsOn: 1 }).getTime();
-    const endMs = addDays(new Date(startMs), 6).getTime();
-
     const weekStartStr = format(startMs, 'yyyy-MM-dd');
     const initialTab = String(sp?.tab || "");
     const initialSelectedListId = typeof sp?.listId === "string" && sp.listId.trim().length > 0 ? sp.listId.trim() : null;
@@ -83,51 +71,43 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         "90174957796" // Monthly Budgets
     ];
 
-    // Fetch in parallel
-    const [
-        initialTasks,
-        initialFolders,
-        yearTimeEntries,
+    const BASE_CONFIG_WEEK = "2026-03-02";
+
+    // 1. Kick off ClickUp fetches (Promises)
+    const initialTasksPromise = getTeamTasks();
+    const initialFoldersPromise = getSpaceFoldersWithLists(PROFESSIONAL_SERVICES_SPACE_ID, EXCLUDED_FOLDERS);
+    const initialTimeEntriesPromise = getTeamTimeEntries(yearStartMs, yearEndMs);
+
+    // 2. Await consolidated DB data (Faster)
+    const dbData = await getDashboardDbData({
+        weekStartStr,
+        previousWeekStartStr,
+        baseWeekStartStr: BASE_CONFIG_WEEK,
+        activeYear
+    });
+
+    const {
         weekConfig,
         weekConfigsForYear,
         leadConfigs,
+        previousLeadConfigs,
         clientConfigs,
-        clientDirectory,
+        previousClientConfigs,
+        baseClientConfigs,
         consultantConfigs,
+        previousConsultantConfigs,
+        baseConsultantConfigs,
+        clientDirectory,
         savedConsultants,
+        activeConsultants,
         consultantConfigsForYear,
         capacityGridConfigsForYear,
-        previousLeadConfigs,
-        previousClientConfigs,
-        previousConsultantConfigs,
-        initialTaskPlannedRollups,
-        initialTaskBillableRollups,
-        previousTaskBillableRollups,
-        initialSidebarStructure
-    ] = await Promise.all([
-        getTeamTasks(),
-        getSpaceFoldersWithLists(PROFESSIONAL_SERVICES_SPACE_ID, EXCLUDED_FOLDERS),
-        getTeamTimeEntries(yearStartMs, yearEndMs),
-        getWeekConfig(weekStartStr),
-        getWeekConfigsForYear(activeYear),
-        getLeadConfigs(weekStartStr),
-        getClientConfigs(weekStartStr),
-        getClientDirectory(),
-        getConsultantConfigs(weekStartStr),
-        getConsultantUtilizationDirectory(weekStartStr),
-        getConsultantConfigsForYear(activeYear),
-        getCapacityGridConfigsForYear(activeYear),
-        getLeadConfigs(previousWeekStartStr),
-        getClientConfigs(previousWeekStartStr),
-        getConsultantConfigs(previousWeekStartStr),
-        getEditableTaskPlannedRollups(weekStartStr),
-        getEditableTaskBillableRollups(weekStartStr),
-        getEditableTaskBillableRollups(previousWeekStartStr),
-        getTaskSidebarStructure(),
-    ]);
+        sidebarStructure,
+        plannedRollups,
+        billableRollupsCurrent,
+        billableRollupsPrevious,
+    } = dbData;
 
-    const isError = !Array.isArray(initialTasks) && (initialTasks as any).error;
-    const validTasks = isError ? [] : initialTasks;
     const consultantRosterById = new Map<number, { id: number; name: string; firstName?: string; lastName?: string; email?: string; source?: string }>();
     const consultantIdByNameKey = new Map<string, number>();
 
@@ -145,38 +125,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         if (nameKey) consultantIdByNameKey.set(nameKey, consultant.id);
     });
 
-    validTasks
-        .filter((task: any) => task.space?.id === PROFESSIONAL_SERVICES_SPACE_ID)
-        .forEach((task: any) => {
-            if (!Array.isArray(task.assignees)) return;
-            task.assignees.forEach((a: any) => {
-                const id = Number(a?.id ?? 0);
-                const nextName = String(a?.username ?? "").trim();
-                if (!id || !nextName) return;
-                const existingById = consultantRosterById.get(id);
-                const nameKey = normalizeConsultantNameKey(nextName);
-                const matchedConsultantId = existingById ? id : consultantIdByNameKey.get(nameKey);
-                const existing = matchedConsultantId ? consultantRosterById.get(matchedConsultantId) : undefined;
-                if (!existing) return;
-                const existingTokens = existing.name.split(/\s+/).filter(Boolean).length;
-                const nextTokens = nextName.split(/\s+/).filter(Boolean).length;
-                if (nextTokens > existingTokens || (nextTokens === existingTokens && nextName.length > existing.name.length)) {
-                    consultantRosterById.set(existing.id, {
-                        ...existing,
-                    name: nextName,
-                });
-                if (nameKey) consultantIdByNameKey.set(nameKey, existing.id);
-            }
-        });
-        });
-
     const consultantRoster = Array.from(consultantRosterById.values())
         .sort((a, b) => a.name.localeCompare(b.name));
+
     const capacityGridConfig = await getCapacityGridConfig(
         weekStartStr,
         consultantRoster.map(({ id, name }) => ({ id, name }))
     );
-    const validYearTimeEntries = Array.isArray(yearTimeEntries) ? yearTimeEntries : [];
+
     const weekConfigByStart = new Map<string, { baseTarget: number, stretchTarget: number }>();
     weekConfigsForYear.forEach((cfg: any) => {
         weekConfigByStart.set(cfg.week, {
@@ -185,6 +141,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         });
     });
 
+    const validYearTimeEntries = await initialTimeEntriesPromise;
     const timeByWeekStart = new Map<string, number>();
     validYearTimeEntries.forEach((entry: any) => {
         const entryStart = Number(entry?.start || 0);
@@ -194,7 +151,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         const hrs = (Number(entry.duration) || 0) / (1000 * 60 * 60);
         timeByWeekStart.set(key, (timeByWeekStart.get(key) || 0) + hrs);
     });
-
+    const currentWeekStartKey = format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
+    const currentWeekActualHours = Number((timeByWeekStart.get(currentWeekStartKey) || 0).toFixed(1));
     const getFirstMonday = (year: number) => {
         const d = new Date(year, 0, 1);
         while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
@@ -220,11 +178,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         const stretchTargetForWeek = weekConfigByStart.get(weekStartKey)?.stretchTarget ?? 400;
         const weekLabel = `W${format(cursor, "II")}`;
         const canonicalData = activeYear === 2026 ? CANONICAL_2026_WEEK_DATA[weekLabel] : undefined;
+        const resolvedTotalHours = weekStartKey >= currentWeekStartKey
+            ? currentWeekActualHours
+            : Number((canonicalData?.totalHours ?? (timeByWeekStart.get(weekStartKey) || 0)).toFixed(1));
         weeklyTrend.push({
             weekStart: weekStartKey,
             weekLabel,
             periodLabel: `${format(cursor, "MM/dd")} to ${format(addDays(cursor, 4), "MM/dd")}`,
-            totalHours: Number((canonicalData?.totalHours ?? (timeByWeekStart.get(weekStartKey) || 0)).toFixed(1)),
+            totalHours: resolvedTotalHours,
             baseTarget: Number(baseTargetForWeek.toFixed(1)),
             stretchTarget: Number(stretchTargetForWeek.toFixed(1)),
             vsTarget: canonicalData?.vsTarget,
@@ -232,9 +193,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         });
         cursor = addWeeks(cursor, 1);
     }
-
-    // Fallback logic for Client and Consultant capacities using seeded W10 (2026-03-02) base
-    const BASE_CONFIG_WEEK = "2026-03-02";
 
     const mergeClientConfigs = (baseRows: any[], weekRows: any[]) => {
         const baseById = new Map<string, any>();
@@ -254,14 +212,12 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
                 ...baseRow,
                 ...(weekRow || {}),
                 clientId,
-                // Keep base order unless week explicitly overrides with a meaningful value.
                 orderIndex: weekRow?.orderIndex ?? baseRow.orderIndex ?? 0,
                 clientName: weekRow?.clientName || baseRow.clientName || clientId,
             });
             weekById.delete(clientId);
         });
 
-        // Include any week-only rows not in the base template.
         weekById.forEach((row) => {
             merged.push({
                 ...row,
@@ -279,7 +235,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         });
     };
 
-    const baseClientConfigs = await getClientConfigs(BASE_CONFIG_WEEK);
     const activeClientIds = new Set(
         clientDirectory
             .filter((client) => client.isActive)
@@ -308,52 +263,40 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         })
         .filter((row) => activeClientIds.size === 0 || activeClientIds.has(String(row.clientId)));
 
-    if (clientConfigs.length > 0 && clientConfigs.length < baseClientConfigs.length) {
-        console.log(
-            `[DashboardPage] partial clientConfigs for ${weekStartStr}: ${clientConfigs.length}/${baseClientConfigs.length}; merged with base template`
-        );
-    }
-
-    let finalConsultantConfigs = consultantConfigs;
-
-    if (finalConsultantConfigs.length === 0) {
-        finalConsultantConfigs = await getConsultantConfigs(BASE_CONFIG_WEEK);
-    }
-
-    console.log(`[DashboardPage] weekStartStr=${weekStartStr}`);
-    console.log(`[DashboardPage] clientConfigs loaded from DB: ${finalClientConfigs.length}`);
+    let finalConsultantConfigs = consultantConfigs.length > 0 ? consultantConfigs : baseConsultantConfigs;
 
     return (
         <DashboardClient
-            initialTasks={validTasks}
-            initialFolders={initialFolders}
-            initialTimeEntries={validYearTimeEntries}
-            isError={isError}
+            initialTasksPromise={initialTasksPromise}
+            initialFoldersPromise={initialFoldersPromise}
+            initialTimeEntriesPromise={initialTimeEntriesPromise}
             weekStartStr={weekStartStr}
             initialTab={initialTab}
             initialSelectedListId={initialSelectedListId}
             initialSelectedFolderId={initialSelectedFolderId}
             initialAssigneeFilter={initialAssigneeFilter}
-            initialTaskPlannedRollups={initialTaskPlannedRollups}
-            initialTaskBillableRollups={initialTaskBillableRollups}
-            initialSidebarStructure={initialSidebarStructure}
+            initialTaskPlannedRollups={plannedRollups}
+            initialTaskBillableRollups={billableRollupsCurrent}
+            initialSidebarStructure={sidebarStructure}
             dbConfig={{
                 weekConfig,
+                weekConfigsForYear,
                 weeklyTrend,
                 leadConfigs,
                 clientConfigs: finalClientConfigs,
                 clientDirectory,
                 consultants: consultantRoster,
+                activeConsultants, // Pass activeConsultants correctly
                 consultantConfigs: finalConsultantConfigs,
                 capacityGridConfig,
                 consultantConfigsForYear,
                 capacityGridConfigsForYear,
-                taskPlannedRollups: initialTaskPlannedRollups,
+                taskPlannedRollups: plannedRollups,
                 previousWeekStartStr,
                 previousLeadConfigs,
                 previousClientConfigs,
                 previousConsultantConfigs,
-                previousTaskBillableRollups,
+                previousTaskBillableRollups: billableRollupsPrevious,
             }}
         />
     );
