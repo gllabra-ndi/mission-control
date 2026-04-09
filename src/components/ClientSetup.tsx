@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, Mail, Plus, Save, Trash2, Users, X } from "lucide-react";
+import { Building2, Mail, Plus, Trash2, Users, X } from "lucide-react";
 import {
     deleteClientDirectoryEntry,
     saveClientDirectoryEntry,
@@ -33,6 +33,8 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
     const [clients, setClients] = useState<EditableClient[]>(initialClients);
     const [isPending, startTransition] = useTransition();
     const newClientRowIdRef = useRef<string | null>(null);
+    const clientsRef = useRef<EditableClient[]>(initialClients);
+    const saveTimersRef = useRef<Record<string, number>>({});
     const [contactModalClientId, setContactModalClientId] = useState<string | null>(null);
     const [contactDrafts, setContactDrafts] = useState<ClientDirectoryContact[]>([]);
 
@@ -50,7 +52,85 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
 
     useEffect(() => {
         setClients(initialClients);
+        clientsRef.current = initialClients;
     }, [initialClients]);
+
+    useEffect(() => {
+        clientsRef.current = clients;
+    }, [clients]);
+
+    useEffect(() => {
+        const saveTimers = saveTimersRef.current;
+        return () => {
+            Object.values(saveTimers).forEach((timerId) => {
+                window.clearTimeout(timerId);
+            });
+        };
+    }, []);
+
+    const applyClientState = useCallback((
+        updater: EditableClient[] | ((prev: EditableClient[]) => EditableClient[]),
+        notifyParent = false,
+    ) => {
+        setClients((prev) => {
+            const nextClients = typeof updater === "function"
+                ? (updater as (prev: EditableClient[]) => EditableClient[])(prev)
+                : updater;
+            clientsRef.current = nextClients;
+            if (notifyParent && onClientsChange) {
+                onClientsChange(nextClients);
+            }
+            return nextClients;
+        });
+    }, [onClientsChange]);
+
+    const persistClient = useCallback((clientId: string) => {
+        if (saveTimersRef.current[clientId]) {
+            window.clearTimeout(saveTimersRef.current[clientId]);
+            delete saveTimersRef.current[clientId];
+        }
+
+        const currentClient = clientsRef.current.find((client) => client.id === clientId);
+        if (!currentClient || !currentClient.name.trim()) return;
+
+        startTransition(async () => {
+            const saved = await saveClientDirectoryEntry({
+                id: currentClient.isNew ? undefined : currentClient.id,
+                name: currentClient.name,
+                team: currentClient.team,
+                sa: currentClient.sa,
+                dealType: currentClient.dealType,
+                min: currentClient.min,
+                max: currentClient.max,
+                isActive: currentClient.isActive,
+                isInternal: currentClient.isInternal,
+                sortOrder: currentClient.sortOrder,
+                contacts: currentClient.contacts || [],
+            });
+            if (!saved) return;
+
+            applyClientState((prev) => prev.map((entry) => (
+                entry.id === clientId ? { ...saved, isNew: false } : entry
+            )), true);
+
+            if (clientId !== saved.id) {
+                setContactModalClientId((prev) => prev === clientId ? saved.id : prev);
+            }
+
+            if (!onClientsChange) {
+                router.refresh();
+            }
+        });
+    }, [applyClientState, onClientsChange, router, startTransition]);
+
+    const scheduleClientSave = useCallback((clientId: string, delayMs = 500) => {
+        if (saveTimersRef.current[clientId]) {
+            window.clearTimeout(saveTimersRef.current[clientId]);
+        }
+        saveTimersRef.current[clientId] = window.setTimeout(() => {
+            void persistClient(clientId);
+        }, delayMs);
+    }, [persistClient]);
 
     const orderedClients = useMemo(
         () => [...clients].sort((a, b) => {
@@ -66,9 +146,10 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
     );
 
     const handleFieldChange = (clientId: string, patch: Partial<EditableClient>) => {
-        setClients((prev) => prev.map((client) => (
+        applyClientState((prev) => prev.map((client) => (
             client.id === clientId ? { ...client, ...patch } : client
-        )));
+        )), true);
+        scheduleClientSave(clientId);
     };
 
     const handleAddClient = () => {
@@ -106,49 +187,24 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
         newClientRowIdRef.current = null;
     }, [clients]);
 
-    const handleSave = (client: EditableClient) => {
-        startTransition(async () => {
-            const saved = await saveClientDirectoryEntry({
-                id: client.isNew ? undefined : client.id,
-                name: client.name,
-                team: client.team,
-                sa: client.sa,
-                dealType: client.dealType,
-                min: client.min,
-                max: client.max,
-                isActive: client.isActive,
-                isInternal: client.isInternal,
-                sortOrder: client.sortOrder,
-                contacts: client.contacts || [],
-            });
-            if (!saved) return;
-            const nextClients = clients.map((entry) => (
-                entry.id === client.id ? saved : entry
-            ));
-            setClients(nextClients);
-            if (onClientsChange) {
-                onClientsChange(nextClients);
-            } else {
-                router.refresh();
-            }
-        });
-    };
-
     const handleRemove = (client: EditableClient) => {
         if (client.isInternal) return;
+        if (saveTimersRef.current[client.id]) {
+            window.clearTimeout(saveTimersRef.current[client.id]);
+            delete saveTimersRef.current[client.id];
+        }
         if (client.isNew) {
-            setClients((prev) => prev.filter((entry) => entry.id !== client.id));
+            applyClientState((prev) => prev.filter((entry) => entry.id !== client.id), true);
+            setContactModalClientId((prev) => prev === client.id ? null : prev);
             return;
         }
         if (!window.confirm(`Remove ${client.name} from client setup?`)) return;
 
         startTransition(async () => {
             await deleteClientDirectoryEntry(client.id);
-            const nextClients = clients.filter((entry) => entry.id !== client.id);
-            setClients(nextClients);
-            if (onClientsChange) {
-                onClientsChange(nextClients);
-            } else {
+            applyClientState((prev) => prev.filter((entry) => entry.id !== client.id), true);
+            setContactModalClientId((prev) => prev === client.id ? null : prev);
+            if (!onClientsChange) {
                 router.refresh();
             }
         });
@@ -170,43 +226,56 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
     };
 
     const handleContactDraftChange = (index: number, patch: Partial<ClientDirectoryContact>) => {
-        setContactDrafts((prev) => prev.map((row, rowIndex) => (
-            rowIndex === index ? normalizeContactDraft({ ...row, ...patch }) : row
-        )));
+        setContactDrafts((prev) => {
+            const nextDrafts = prev.map((row, rowIndex) => (
+                rowIndex === index ? normalizeContactDraft({ ...row, ...patch }) : row
+            ));
+            if (contactModalClientId) {
+                const nextContacts = compactContactDrafts(nextDrafts);
+                applyClientState((current) => current.map((client) => (
+                    client.id === contactModalClientId ? { ...client, contacts: nextContacts } : client
+                )), true);
+                scheduleClientSave(contactModalClientId);
+            }
+            return nextDrafts;
+        });
     };
 
     const handleAddContactRow = () => {
-        setContactDrafts((prev) => ([
-            ...prev,
-            normalizeContactDraft({
-                id: `contact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                firstName: "",
-                lastName: "",
-                email: "",
-                role: STANDARD_CLIENT_ROLES[0],
-            }),
-        ]));
+        setContactDrafts((prev) => {
+            const nextDrafts = [
+                ...prev,
+                normalizeContactDraft({
+                    id: `contact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    firstName: "",
+                    lastName: "",
+                    email: "",
+                    role: STANDARD_CLIENT_ROLES[0],
+                }),
+            ];
+            if (contactModalClientId) {
+                const nextContacts = compactContactDrafts(nextDrafts);
+                applyClientState((current) => current.map((client) => (
+                    client.id === contactModalClientId ? { ...client, contacts: nextContacts } : client
+                )), true);
+                scheduleClientSave(contactModalClientId);
+            }
+            return nextDrafts;
+        });
     };
 
     const handleRemoveContactRow = (index: number) => {
-        setContactDrafts((prev) => prev.filter((_, rowIndex) => rowIndex !== index));
-    };
-
-    const handleSaveContacts = () => {
-        if (!contactModalClientId) return;
-
-        const nextContacts = compactContactDrafts(contactDrafts);
-        setClients((prev) => {
-            const nextClients = prev.map((client) => (
-                client.id === contactModalClientId ? { ...client, contacts: nextContacts } : client
-            ));
-            if (onClientsChange) {
-                onClientsChange(nextClients);
+        setContactDrafts((prev) => {
+            const nextDrafts = prev.filter((_, rowIndex) => rowIndex !== index);
+            if (contactModalClientId) {
+                const nextContacts = compactContactDrafts(nextDrafts);
+                applyClientState((current) => current.map((client) => (
+                    client.id === contactModalClientId ? { ...client, contacts: nextContacts } : client
+                )), true);
+                scheduleClientSave(contactModalClientId);
             }
-            return nextClients;
+            return nextDrafts;
         });
-
-        handleCloseContactModal();
     };
 
     const activeCount = orderedClients.filter((client) => client.isActive).length;
@@ -237,6 +306,9 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                 <div className="flex items-center gap-3">
                     <span className="rounded-full border border-border/50 bg-surface/20 px-3 py-1 text-[11px] text-text-muted">
                         {activeCount} active clients
+                    </span>
+                    <span className="rounded-full border border-border/50 bg-surface/20 px-3 py-1 text-[11px] text-text-muted">
+                        {isPending ? "Autosaving..." : "Autosave on"}
                     </span>
                     <button
                         type="button"
@@ -357,15 +429,6 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                     </td>
                                     <td className="px-4 py-3 text-right">
                                         <div className="flex items-center justify-end gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => handleSave(client)}
-                                                disabled={isPending || !client.name.trim()}
-                                                className="inline-flex items-center gap-2 rounded-xl border border-border/60 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-white hover:bg-white/[0.08] disabled:opacity-60"
-                                            >
-                                                <Save className="h-3.5 w-3.5" />
-                                                Save
-                                            </button>
                                             <button
                                                 type="button"
                                                 onClick={() => handleRemove(client)}
@@ -502,14 +565,7 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                         onClick={handleCloseContactModal}
                                         className="rounded-lg border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
                                     >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={handleSaveContacts}
-                                        className="inline-flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/15 px-3 py-2 text-sm font-medium text-white hover:bg-primary/25"
-                                    >
-                                        Save Contacts
+                                        Done
                                     </button>
                                 </div>
                             </div>
