@@ -625,6 +625,7 @@ async function ensureClientDirectorySeeded() {
             isActive: true,
             isInternal: false,
             sortOrder: defaults.sortOrder,
+            contacts: [],
         });
     });
 
