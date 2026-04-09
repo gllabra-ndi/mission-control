@@ -1,10 +1,10 @@
 import { format } from "date-fns";
 import { Clock } from "lucide-react";
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 import { cn } from "@/lib/utils";
 
 interface TaskCardProps {
-    task: ClickUpTask;
+    task: ImportedTask;
 }
 
 export function TaskCard({ task }: TaskCardProps) {

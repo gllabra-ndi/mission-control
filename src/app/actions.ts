@@ -8,7 +8,6 @@ import { revalidatePath } from "next/cache";
 import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
-import { getTeamMembers, getTeamTasks } from "@/lib/clickup";
 import { STANDARD_CLIENT_ROLES } from "@/lib/clientRoles";
 import {
     getEffectiveEditableTaskStatus,
@@ -20,6 +19,13 @@ import {
     normalizeEstimateHours,
     normalizeWeekKey,
 } from "@/lib/editableTaskLifecycle";
+import {
+    normalizeAllocationSource,
+    normalizeSidebarSource,
+    toStoredSidebarSource,
+    type AllocationSource,
+    type SidebarSource,
+} from "@/lib/legacySources";
 
 export interface CapacityGridResource {
     id: string;
@@ -32,7 +38,7 @@ export interface CapacityGridResource {
 
 export interface CapacityGridAllocation {
     hours: number;
-    source?: "manual" | "clickup";
+    source?: AllocationSource;
     note?: string;
 }
 
@@ -147,9 +153,6 @@ type LegacyCapacityGridDefaults = {
     min: number | null;
     max: number | null;
 };
-
-let clickUpConsultantSyncPromise: Promise<void> | null = null;
-let lastClickUpConsultantSyncAt = 0;
 
 function pickLegacyMetricValue(current: number | null, incoming: number | null) {
     const currentValue = current == null ? null : Number(current);
@@ -352,7 +355,7 @@ export interface TaskSidebarBoardRecord {
 
 export interface TaskSidebarBoardPlacementRecord {
     boardId: string;
-    source: "clickup" | "local";
+    source: SidebarSource;
     boardName?: string | null;
     clientId?: string | null;
     clientName?: string | null;
@@ -362,7 +365,7 @@ export interface TaskSidebarBoardPlacementRecord {
 
 export interface TaskSidebarFolderOverrideRecord {
     folderId: string;
-    source: "clickup" | "local";
+    source: SidebarSource;
     name: string;
 }
 
@@ -818,7 +821,7 @@ function buildResourcesFromConsultants(consultants?: CapacityGridConsultant[] | 
 function buildEmptyAllocations(resources: CapacityGridResource[]): Record<string, CapacityGridAllocation> {
     const allocations: Record<string, CapacityGridAllocation> = {};
     resources.forEach((resource) => {
-        allocations[resource.id] = { hours: 0, source: "manual", note: "" };
+        allocations[resource.id] = { hours: 0, source: "empty", note: "" };
     });
     return allocations;
 }
@@ -826,13 +829,21 @@ function buildEmptyAllocations(resources: CapacityGridResource[]): Record<string
 function normalizeAllocationCell(cell: any): CapacityGridAllocation {
     const rawHours = cell?.hours ?? (Number(cell?.wt ?? 0) + Number(cell?.wPlus ?? 0));
     const hours = Number(rawHours ?? 0);
-    const source = cell?.source === "clickup" || cell?.wtSource === "clickup" || cell?.wPlusSource === "clickup"
-        ? "clickup"
-        : "manual";
+    const normalizedNote = String(cell?.note ?? "");
+    const source =
+        normalizeAllocationSource(cell?.source) === "seeded"
+        || normalizeAllocationSource(cell?.wtSource) === "seeded"
+        || normalizeAllocationSource(cell?.wPlusSource) === "seeded"
+            ? "seeded"
+            : normalizeAllocationSource(cell?.source) === "manual"
+                ? "manual"
+                : Math.abs(hours) > 0.0001 || normalizedNote.length > 0
+                    ? "manual"
+                    : "empty";
     return {
         hours,
         source,
-        note: String(cell?.note ?? ""),
+        note: normalizedNote,
     };
 }
 
@@ -877,11 +888,11 @@ async function applyClientDirectoryMetadataToCapacityPayload(payload: CapacityGr
         const nextRow: CapacityGridRow = {
             ...baseRow,
             id: client.id,
-            team: Number(client.team ?? baseRow.team ?? 0),
-            teamSa: client.sa || String(baseRow.teamSa ?? ""),
-            dealType: client.dealType || String(baseRow.dealType ?? ""),
-            wkMin: Number(client.min ?? baseRow.wkMin ?? 0),
-            wkMax: Number(client.max ?? baseRow.wkMax ?? 0),
+            team: Number(baseRow.team ?? client.team ?? 0),
+            teamSa: String(baseRow.teamSa ?? client.sa ?? ""),
+            dealType: String(baseRow.dealType ?? client.dealType ?? ""),
+            wkMin: Number(baseRow.wkMin ?? client.min ?? 0),
+            wkMax: Number(baseRow.wkMax ?? client.max ?? 0),
             client: preferClientName(String(baseRow.client ?? ""), client.name),
             allocations: buildEmptyAllocations(payload.resources),
             notes: String(baseRow.notes ?? ""),
@@ -1048,7 +1059,7 @@ function mergeCapacityPayloadWithRoster(payload: CapacityGridPayload, rosterReso
         const nextAllocations = { ...(row.allocations || {}) };
         additions.forEach((resource) => {
             if (!nextAllocations[resource.id]) {
-                nextAllocations[resource.id] = { hours: 0, source: "manual", note: "" };
+                nextAllocations[resource.id] = { hours: 0, source: "empty", note: "" };
             }
         });
         return {
@@ -1660,123 +1671,7 @@ export async function getConsultants(): Promise<ConsultantRecord[]> {
     }));
 }
 
-async function syncClickUpConsultantsIntoLocalDirectory() {
-    const now = Date.now();
-    if (now - lastClickUpConsultantSyncAt < 5 * 60 * 1000) {
-        return;
-    }
-
-    const [tasks, members] = await Promise.all([
-        getTeamTasks(),
-        getTeamMembers(),
-    ]);
-
-    const memberById = new Map<number, Awaited<ReturnType<typeof getTeamMembers>>[number]>();
-    members.forEach((member) => {
-        memberById.set(Number(member.id), member);
-    });
-
-    const rosterById = new Map<number, { id: number; firstName: string; lastName: string; email: string }>();
-    tasks.forEach((task: any) => {
-        if (!Array.isArray(task?.assignees)) return;
-        task.assignees.forEach((assignee: any) => {
-            const consultantId = Number(assignee?.id ?? 0);
-            if (!Number.isFinite(consultantId) || consultantId <= 0) return;
-
-            const member = memberById.get(consultantId);
-            const fallbackName = formatConsultantName(
-                String(assignee?.username ?? "").trim().split(/\s+/)[0] ?? "",
-                String(assignee?.username ?? "").trim().split(/\s+/).slice(1).join(" ")
-            ).trim();
-            const fullName = String(member?.username ?? assignee?.username ?? fallbackName).trim();
-            const nameParts = fullName.split(/\s+/).filter(Boolean);
-            const firstName = String(member?.firstName ?? nameParts[0] ?? "").trim();
-            const lastName = String(member?.lastName ?? nameParts.slice(1).join(" ")).trim();
-            const email = normalizeEmail(String(member?.email ?? ""));
-            if (!firstName || !email) return;
-
-            rosterById.set(consultantId, {
-                id: consultantId,
-                firstName,
-                lastName,
-                email,
-            });
-        });
-    });
-
-    if (rosterById.size === 0) {
-        lastClickUpConsultantSyncAt = now;
-        return;
-    }
-
-    const existingConsultants = await prisma.consultant.findMany();
-
-    const consultantById = new Map<number, any>();
-    const consultantByEmail = new Map<string, any>();
-    existingConsultants.forEach((consultant) => {
-        consultantById.set(Number(consultant.id), consultant);
-        consultantByEmail.set(normalizeEmail(String(consultant.email ?? "")), consultant);
-    });
-
-    for (const consultant of Array.from(rosterById.values())) {
-        const existingById = consultantById.get(consultant.id);
-        const existingByEmail = consultantByEmail.get(consultant.email);
-
-        if (existingById) {
-            await prisma.consultant.update({
-                where: { id: consultant.id },
-                data: {
-                    firstName: consultant.firstName,
-                    lastName: consultant.lastName,
-                    email: consultant.email,
-                    source: "clickup",
-                    externalId: String(consultant.id),
-                },
-            });
-        } else if (existingByEmail) {
-            await prisma.consultant.update({
-                where: { email: consultant.email },
-                data: {
-                    firstName: consultant.firstName,
-                    lastName: consultant.lastName,
-                    source: "clickup",
-                    externalId: String(consultant.id),
-                },
-            });
-        } else {
-            await prisma.consultant.create({
-                data: {
-                    id: consultant.id,
-                    firstName: consultant.firstName,
-                    lastName: consultant.lastName,
-                    email: consultant.email,
-                    source: "clickup",
-                    externalId: String(consultant.id),
-                },
-            });
-        }
-
-    }
-
-    lastClickUpConsultantSyncAt = now;
-}
-
-async function ensureClickUpConsultantsSynced() {
-    if (!clickUpConsultantSyncPromise) {
-        clickUpConsultantSyncPromise = syncClickUpConsultantsIntoLocalDirectory()
-            .catch((error) => {
-                console.error("Unable to sync ClickUp consultants", error);
-            })
-            .finally(() => {
-                clickUpConsultantSyncPromise = null;
-            });
-    }
-
-    await clickUpConsultantSyncPromise;
-}
-
-export async function syncClickUpConsultantsAndUsers(): Promise<ConsultantRecord[]> {
-    await ensureClickUpConsultantsSynced();
+export async function syncConsultantsAndUsers(): Promise<ConsultantRecord[]> {
     return await getConsultantUtilizationDirectory();
 }
 
@@ -2553,16 +2448,18 @@ export async function copyConsultantUtilizationFromPriorWeek(week: string, consu
                 },
             },
             update: {
+                maxCapacity: Number(row.maxCapacity ?? 40),
                 billableCapacity: Number(row.billableCapacity ?? 40),
+                notes: String(row.notes ?? ""),
             },
             create: {
                 week,
                 consultantId: targetConsultantId,
-                maxCapacity: 40,
+                maxCapacity: Number(row.maxCapacity ?? 40),
                 billableCapacity: Number(row.billableCapacity ?? 40),
                 mtHrs: 0,
                 wPlusHrs: 0,
-                notes: "",
+                notes: String(row.notes ?? ""),
             },
         });
 
@@ -2760,11 +2657,32 @@ export async function getEditableTasks(
     const normalizedScopeType = String(scopeType || "all");
     const normalizedScopeId = String(scopeId || "all");
     const normalizedWeek = normalizeWeekKey(week);
+    const isWorkspaceScope = normalizedScopeType === "all" && normalizedScopeId === "all";
+    const visibilityWhere = {
+        week: {
+            lte: normalizedWeek,
+        },
+        OR: [
+            { closedDate: null },
+            { closedDate: { gte: normalizedWeek } },
+        ],
+    };
+    const scopedVisibilityWhere = isWorkspaceScope
+        ? visibilityWhere
+        : {
+            scopeType: normalizedScopeType,
+            scopeId: normalizedScopeId,
+            ...visibilityWhere,
+        };
 
     const legacyClosedRows = await editableTaskModel.findMany({
         where: {
-            scopeType: normalizedScopeType,
-            scopeId: normalizedScopeId,
+            ...(isWorkspaceScope
+                ? {}
+                : {
+                    scopeType: normalizedScopeType,
+                    scopeId: normalizedScopeId,
+                }),
             status: "closed",
             closedDate: null,
         },
@@ -2785,17 +2703,7 @@ export async function getEditableTasks(
     }
 
     const existingRows = await editableTaskModel.findMany({
-        where: {
-            scopeType: normalizedScopeType,
-            scopeId: normalizedScopeId,
-            week: {
-                lte: normalizedWeek,
-            },
-            OR: [
-                { closedDate: null },
-                { closedDate: { gte: normalizedWeek } },
-            ],
-        },
+        where: scopedVisibilityWhere,
         include: {
             attachments: {
                 orderBy: [{ createdAt: "desc" }],
@@ -2814,9 +2722,11 @@ export async function getEditableTasks(
         ],
     });
 
-    const filteredSeedTasks = seedTasks.filter((task) => {
-        return isEditableTaskVisibleInWeek(task, normalizedWeek);
-    });
+    const filteredSeedTasks = isWorkspaceScope
+        ? []
+        : seedTasks.filter((task) => {
+            return isEditableTaskVisibleInWeek(task, normalizedWeek);
+        });
     const allSeedSourceTaskIds = new Set(
         seedTasks
             .map((task) => String(task?.sourceTaskId ?? "").trim())
@@ -2824,8 +2734,12 @@ export async function getEditableTasks(
     );
     const allScopedSourceRows = await editableTaskModel.findMany({
         where: {
-            scopeType: normalizedScopeType,
-            scopeId: normalizedScopeId,
+            ...(isWorkspaceScope
+                ? {}
+                : {
+                    scopeType: normalizedScopeType,
+                    scopeId: normalizedScopeId,
+                }),
             sourceTaskId: {
                 not: null,
             },
@@ -2861,17 +2775,7 @@ export async function getEditableTasks(
 
         const refreshedExistingRows = stalePlaceholderIds.length > 0
         ? await editableTaskModel.findMany({
-            where: {
-                scopeType: normalizedScopeType,
-                scopeId: normalizedScopeId,
-                week: {
-                    lte: normalizedWeek,
-                },
-                OR: [
-                    { closedDate: null },
-                    { closedDate: { gte: normalizedWeek } },
-                ],
-            },
+            where: scopedVisibilityWhere,
             include: {
                 attachments: {
                     orderBy: [{ createdAt: "desc" }],
@@ -2972,17 +2876,7 @@ export async function getEditableTasks(
     }
 
     const rows = await editableTaskModel.findMany({
-        where: {
-            scopeType: normalizedScopeType,
-            scopeId: normalizedScopeId,
-            week: {
-                lte: normalizedWeek,
-            },
-            OR: [
-                { closedDate: null },
-                { closedDate: { gte: normalizedWeek } },
-            ],
-        },
+        where: scopedVisibilityWhere,
         include: {
             attachments: {
                 orderBy: [{ createdAt: "desc" }],
@@ -3583,7 +3477,7 @@ export async function getTaskSidebarStructure(): Promise<TaskSidebarStructureRec
         })),
         placements: placements.map((row: any) => ({
             boardId: String(row.boardId ?? ""),
-            source: String(row.source ?? "clickup") === "local" ? "local" : "clickup",
+            source: normalizeSidebarSource(row.source),
             boardName: row.boardName == null ? null : String(row.boardName),
             clientId: row.clientId == null ? null : String(row.clientId),
             clientName: row.clientName == null ? null : String(row.clientName),
@@ -3592,7 +3486,7 @@ export async function getTaskSidebarStructure(): Promise<TaskSidebarStructureRec
         })).filter((row: TaskSidebarBoardPlacementRecord) => row.boardId.length > 0),
         folderOverrides: folderOverrides.map((row: any) => ({
             folderId: String(row.folderId ?? ""),
-            source: String(row.source ?? "clickup") === "local" ? "local" : "clickup",
+            source: normalizeSidebarSource(row.source),
             name: String(row.name ?? ""),
         })).filter((row: TaskSidebarFolderOverrideRecord) => row.folderId.length > 0 && row.name.length > 0),
         hiddenFolderIds: hiddenFolders.map((row: any) => String(row.folderId ?? "")).filter(Boolean),
@@ -3681,7 +3575,7 @@ export async function saveTaskSidebarBoardLayout(input: {
             boardName?: string | null;
             clientId?: string | null;
             clientName?: string | null;
-            source: "clickup" | "local";
+            source: SidebarSource;
         }>;
     }>;
 }) {
@@ -3697,7 +3591,7 @@ export async function saveTaskSidebarBoardLayout(input: {
                 boardName: board.boardName == null ? null : String(board.boardName),
                 clientId: board.clientId == null ? null : String(board.clientId),
                 clientName: board.clientName == null ? null : String(board.clientName),
-                source: String(board.source ?? "clickup") === "local" ? "local" as const : "clickup" as const,
+                source: normalizeSidebarSource(board.source),
             })).filter((board) => board.boardId.length > 0),
         }))
         .filter((folder) => folder.folderId.length > 0);
@@ -3710,7 +3604,7 @@ export async function saveTaskSidebarBoardLayout(input: {
             await taskSidebarBoardPlacementModel.upsert({
                 where: {
                     source_boardId: {
-                        source: board.source,
+                        source: toStoredSidebarSource(board.source),
                         boardId: board.boardId,
                     },
                 },
@@ -3722,7 +3616,7 @@ export async function saveTaskSidebarBoardLayout(input: {
                     orderIndex: index,
                 },
                 create: {
-                    source: board.source,
+                    source: toStoredSidebarSource(board.source),
                     boardId: board.boardId,
                     boardName: board.boardName,
                     clientId: board.clientId,
@@ -3750,7 +3644,7 @@ export async function saveTaskSidebarBoardLayout(input: {
 
 export async function updateTaskSidebarBoard(input: {
     boardId: string;
-    source: "clickup" | "local";
+    source: SidebarSource;
     parentFolderId: string;
     name: string;
     clientId: string;
@@ -3765,13 +3659,13 @@ export async function updateTaskSidebarBoard(input: {
     const name = String(input.name || "").trim();
     const clientId = String(input.clientId || "").trim();
     const clientName = String(input.clientName || "").trim();
-    const source = String(input.source || "clickup") === "local" ? "local" as const : "clickup" as const;
+    const source = normalizeSidebarSource(input.source);
     if (!boardId || !parentFolderId || !name || !clientId || !clientName) return null;
 
     const existingPlacement = await taskSidebarBoardPlacementModel.findUnique({
         where: {
             source_boardId: {
-                source,
+                source: toStoredSidebarSource(source),
                 boardId,
             },
         },
@@ -3780,7 +3674,7 @@ export async function updateTaskSidebarBoard(input: {
     await taskSidebarBoardPlacementModel.upsert({
         where: {
             source_boardId: {
-                source,
+                source: toStoredSidebarSource(source),
                 boardId,
             },
         },
@@ -3792,7 +3686,7 @@ export async function updateTaskSidebarBoard(input: {
             orderIndex: Number(existingPlacement?.orderIndex ?? 0),
         },
         create: {
-            source,
+            source: toStoredSidebarSource(source),
             boardId,
             boardName: name,
             clientId,
@@ -3815,7 +3709,7 @@ export async function updateTaskSidebarBoard(input: {
 
 export async function updateTaskSidebarFolder(input: {
     folderId: string;
-    source: "clickup" | "local";
+    source: SidebarSource;
     name: string;
 }) {
     const taskSidebarFolderModel = (prisma as any).taskSidebarFolder;
@@ -3824,19 +3718,19 @@ export async function updateTaskSidebarFolder(input: {
 
     const folderId = String(input.folderId || "").trim();
     const name = String(input.name || "").trim();
-    const source = String(input.source || "clickup") === "local" ? "local" as const : "clickup" as const;
+    const source = normalizeSidebarSource(input.source);
     if (!folderId || !name) return null;
 
     await taskSidebarFolderOverrideModel.upsert({
         where: {
             source_folderId: {
-                source,
+                source: toStoredSidebarSource(source),
                 folderId,
             },
         },
         update: { name },
         create: {
-            source,
+            source: toStoredSidebarSource(source),
             folderId,
             name,
         },

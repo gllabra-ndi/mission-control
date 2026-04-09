@@ -58,8 +58,6 @@ Set these environment variables in Vercel:
 - `AZURE_AD_CLIENT_ID`
 - `AZURE_AD_CLIENT_SECRET`
 - `AZURE_AD_TENANT_ID`
-- `CLICKUP_API_KEY`
-- `CLICKUP_TEAM_ID`
 - optional NetSuite variables if needed
 
 ## 4. Validate Production Environment
@@ -129,7 +127,7 @@ Recommended rollout:
 
 After the first rollout:
 
-1. Add ClickUp background sync instead of broad live fetches on every page render
+1. Harden local task and timesheet automation
 2. Add role-based permissions
 3. Add Sentry
 4. Add DB backups and restore checks

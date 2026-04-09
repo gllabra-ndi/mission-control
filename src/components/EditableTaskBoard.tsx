@@ -20,9 +20,9 @@ import {
     updateEditableTask,
     updateEditableTaskBillableEntry,
 } from "@/app/actions";
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 import {
-    buildEditableTaskSeedFromClickUp,
+    buildEditableTaskSeedFromImportedTask,
     getEffectiveEditableTaskStatus,
     isEditableTaskVisibleInWeek,
     normalizeDateKey,
@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 
 interface EditableTaskBoardProps {
     activeWeekStr: string;
-    tasks: ClickUpTask[];
+    tasks: ImportedTask[];
     scopeType: "all" | "list" | "folder";
     scopeId: string;
     scopeName: string;
@@ -100,7 +100,7 @@ function normalizeScopeValue(value: string): string {
     return String(value || "").trim().toLowerCase();
 }
 
-function getClientLabelForTask(task: ClickUpTask): string {
+function getClientLabelForTask(task: ImportedTask): string {
     const listName = String(task?.list?.name ?? "").trim();
     const projectName = String(task?.project?.name ?? "").trim();
     const folderName = String(task?.folder?.name ?? "").trim();
@@ -108,7 +108,7 @@ function getClientLabelForTask(task: ClickUpTask): string {
 }
 
 function filterTasksByScope(
-    tasks: ClickUpTask[],
+    tasks: ImportedTask[],
     scopeType: "all" | "list" | "folder",
     scopeId: string,
     scopeName: string
@@ -143,10 +143,10 @@ function filterTasksByScope(
 }
 
 function buildSeedTasks(
-    tasks: ClickUpTask[],
+    tasks: ImportedTask[],
     activeWeekStr: string
 ): EditableTaskSeed[] {
-    return tasks.map((task) => buildEditableTaskSeedFromClickUp(task, activeWeekStr));
+    return tasks.map((task) => buildEditableTaskSeedFromImportedTask(task, activeWeekStr));
 }
 
 function toWeekStart(value: string): string {
@@ -669,7 +669,7 @@ export function EditableTaskBoard({
         <>
             {editorState && boardTasks.find((task) => task.id === editorState.id)?.sourceTaskId && (
                 <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-text-muted">
-                    Seeded from the original ClickUp task and editable locally on this weekly board.
+                    Seeded from an original source task and editable locally on this weekly board.
                 </div>
             )}
             <label className="block space-y-1">
@@ -746,7 +746,7 @@ export function EditableTaskBoard({
                     className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
                 />
                 <div className="text-[11px] text-text-muted">
-                    Planned Week is when the task moves from Backlog into Open status and can seed Plan vs Actuals when the plan cell is still zero.
+                    Planned Week controls when the task becomes open and when its estimate appears in weekly task-estimate rollups.
                 </div>
             </label>
 
@@ -1133,13 +1133,13 @@ export function EditableTaskBoard({
                             ? "Saving..."
                             : isLoading
                                 ? "Loading..."
-                                : `${Object.values(groupedTasks).reduce((sum, items) => sum + items.length, 0)} editable tasks from ${scopedTasks.length} scoped ClickUp tasks`}
+                                : `${Object.values(groupedTasks).reduce((sum, items) => sum + items.length, 0)} editable tasks in this scope`}
                     </span>
                 </div>
             </div>
 
             <div className="text-xs text-text-muted">
-                Original ClickUp tasks for this scope/week are used as editable placeholders here.
+                Tasks in this board are saved locally and roll up into planning and actuals views.
             </div>
 
             <div className="border border-border/50 bg-surface/20 rounded-xl p-4 overflow-hidden min-h-[640px]">
@@ -1190,7 +1190,7 @@ export function EditableTaskBoard({
                                                     {task.sourceTaskId && (
                                                         <div className="mt-2">
                                                             <span className="inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
-                                                                ClickUp Placeholder
+                                                                Seeded Task
                                                             </span>
                                                         </div>
                                                     )}

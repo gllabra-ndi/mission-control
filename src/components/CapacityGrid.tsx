@@ -16,7 +16,7 @@ import {
 } from "@/app/actions";
 import { ArrowUpRight, ChevronLeft, ChevronRight, Copy, Grid2x2, Save, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 import type { FolderWithLists } from "@/components/Sidebar";
 
 interface CapacityGridProps {
@@ -26,7 +26,7 @@ interface CapacityGridProps {
     consultants?: Array<{ id: number; name: string }>;
     consultantConfigsById?: Record<number, { maxCapacity: number; billableCapacity: number; notes: string }>;
     clientDirectory?: ClientDirectoryRecord[];
-    tasks?: ClickUpTask[];
+    tasks?: ImportedTask[];
     folders?: FolderWithLists[];
     activeAssigneeFilter?: string | null;
     plannedRollups?: EditableTaskPlannedRollupRecord[];
@@ -51,7 +51,7 @@ function normalizeName(value: string) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function getTaskScopeLabels(task: ClickUpTask | null) {
+function getTaskScopeLabels(task: ImportedTask | null) {
     return [
         String(task?.list?.name ?? "").trim(),
         String(task?.project?.name ?? "").trim(),
@@ -111,11 +111,6 @@ function sanitizeCapacityRows(rows: CapacityGridRow[] = []): CapacityGridRow[] {
     }));
 }
 
-type ClickUpCellMetrics = {
-    planned: number;
-    actuals: number;
-};
-
 type AllocationNoteEditorState = {
     rowId: string;
     resourceId: string;
@@ -166,7 +161,6 @@ export function CapacityGrid({
     const [gridMode, setGridMode] = useState<"plan" | "view">("plan");
     const [allocationInputDrafts, setAllocationInputDrafts] = useState<Record<string, string>>({});
     const initializedWeekRef = useRef<string>("");
-    const autoFillRunKeyRef = useRef<string>("");
     const navUnlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const gridScrollRef = useRef<HTMLDivElement | null>(null);
     const restoredViewKeyRef = useRef<string>("");
@@ -203,7 +197,7 @@ export function CapacityGrid({
     }, [clientDirectory]);
 
     const sourceTaskById = useMemo(() => {
-        const byId = new Map<string, ClickUpTask>();
+        const byId = new Map<string, ImportedTask>();
         tasks.forEach((task) => {
             const id = String(task?.id ?? "").trim();
             if (!id) return;
@@ -476,9 +470,11 @@ export function CapacityGrid({
         const draftKey = getAllocationDraftKey(rowId, resourceId);
         const currentRow = rows.find((row) => row.id === rowId);
         const currentHours = Number(currentRow?.allocations?.[resourceId]?.hours ?? 0);
+        const currentSource = String(currentRow?.allocations?.[resourceId]?.source ?? "empty");
         const rawDraft = allocationInputDrafts[draftKey];
         const nextValue = clampNonNegative(toNumber(rawDraft ?? formatEditableNumber(currentHours)));
-        if (nextValue !== currentHours) {
+        const shouldLockManual = rawDraft !== undefined && currentSource !== "manual";
+        if (nextValue !== currentHours || shouldLockManual) {
             const nextRows = rows.map((row) => {
                 if (row.id !== rowId) return row;
                 const nextAllocations: Record<string, CapacityGridAllocation> = {
@@ -520,6 +516,7 @@ export function CapacityGrid({
                         [resourceId]: {
                             ...row.allocations[resourceId],
                             note,
+                            source: "manual" as const,
                         },
                     },
                 };
@@ -554,6 +551,7 @@ export function CapacityGrid({
                     [noteEditor.resourceId]: {
                         ...row.allocations[noteEditor.resourceId],
                         note: nextNote,
+                        source: "manual" as const,
                     },
                 },
             };
@@ -575,8 +573,8 @@ export function CapacityGrid({
             nextId = `${clientIdFromName(trimmed)}-${suffix++}`;
         }
 
-            const allocations = resources.reduce<Record<string, { hours: number; source: "manual"; note: string }>>((acc, resource) => {
-                acc[resource.id] = { hours: 0, source: "manual", note: "" };
+            const allocations = resources.reduce<Record<string, { hours: number; source: "empty"; note: string }>>((acc, resource) => {
+                acc[resource.id] = { hours: 0, source: "empty", note: "" };
                 return acc;
             }, {});
 
@@ -614,8 +612,8 @@ export function CapacityGrid({
     const rowStats = useMemo(() => {
         return rows.map((row) => {
             const clientMeta = getClientMetadata(row);
-            const rowMin = Number(clientMeta?.min ?? row.wkMin ?? 0);
-            const rowMax = Number(clientMeta?.max ?? row.wkMax ?? 0);
+            const rowMin = Number(row.wkMin ?? clientMeta?.min ?? 0);
+            const rowMax = Number(row.wkMax ?? clientMeta?.max ?? 0);
             const total = visibleResources.reduce((sum, resource) => sum + Number(row.allocations[resource.id]?.hours ?? 0), 0);
             return {
                 id: row.id,
@@ -632,8 +630,14 @@ export function CapacityGrid({
             hoursByResource[resource.id] = rows.reduce((sum, row) => sum + Number(row.allocations[resource.id]?.hours ?? 0), 0);
         });
 
-        const wkMinTotal = rows.reduce((sum, row) => sum + Number(getClientMetadata(row)?.min ?? row.wkMin ?? 0), 0);
-        const wkMaxTotal = rows.reduce((sum, row) => sum + Number(getClientMetadata(row)?.max ?? row.wkMax ?? 0), 0);
+        const wkMinTotal = rows.reduce((sum, row) => {
+            const clientMeta = getClientMetadata(row);
+            return sum + Number(row.wkMin ?? clientMeta?.min ?? 0);
+        }, 0);
+        const wkMaxTotal = rows.reduce((sum, row) => {
+            const clientMeta = getClientMetadata(row);
+            return sum + Number(row.wkMax ?? clientMeta?.max ?? 0);
+        }, 0);
         const totalHours = Object.values(hoursByResource).reduce((a, b) => a + b, 0);
 
         return {
@@ -822,134 +826,6 @@ export function CapacityGrid({
         }, 0);
     }, [getScopeLabels, plannedRollups]);
 
-    const clickupMetricsByPair = useMemo(() => {
-        const exactMap = new Map<string, ClickUpCellMetrics>();
-        const byConsultantListName = new Map<string, Map<string, ClickUpCellMetrics>>();
-
-        const add = (consultantKey: string, clientKey: string, metrics: ClickUpCellMetrics) => {
-            if (!consultantKey || !clientKey || (metrics.planned <= 0 && metrics.actuals <= 0)) return;
-            const key = `${consultantKey}|${clientKey}`;
-            const current = exactMap.get(key) ?? { planned: 0, actuals: 0 };
-            exactMap.set(key, {
-                planned: current.planned + metrics.planned,
-                actuals: current.actuals + metrics.actuals,
-            });
-        };
-
-        const addListName = (consultantKey: string, listNameKey: string, metrics: ClickUpCellMetrics) => {
-            if (!consultantKey || !listNameKey || (metrics.planned <= 0 && metrics.actuals <= 0)) return;
-            const byList = byConsultantListName.get(consultantKey) || new Map<string, ClickUpCellMetrics>();
-            const current = byList.get(listNameKey) ?? { planned: 0, actuals: 0 };
-            byList.set(listNameKey, {
-                planned: current.planned + metrics.planned,
-                actuals: current.actuals + metrics.actuals,
-            });
-            byConsultantListName.set(consultantKey, byList);
-        };
-
-        const weekStartMs = new Date(activeWeekStr + "T00:00:00").getTime();
-        const weekEndMs = addDays(new Date(weekStartMs), 6).getTime();
-
-        tasks.forEach((task) => {
-            const estimateMs = Number(task?.time_estimate ?? 0);
-            const plannedHours = estimateMs / (1000 * 60 * 60);
-            if (plannedHours <= 0) return;
-
-            const dateMs = Number(task?.due_date ?? task?.start_date ?? task?.date_created ?? 0);
-            if (!Number.isFinite(dateMs) || dateMs < weekStartMs || dateMs > weekEndMs) return;
-
-            const listIdKey = normalizeName(String(task?.list?.id ?? ""));
-            const listNameKey = normalizeName(String(task?.list?.name ?? ""));
-            const clientKeys: string[] = [];
-            if (listIdKey) clientKeys.push(`id:${listIdKey}`);
-            if (listNameKey) clientKeys.push(`name:${listNameKey}`);
-            if (clientKeys.length === 0) return;
-
-            const assignees = Array.isArray(task?.assignees) ? task.assignees : [];
-            if (assignees.length === 0) return;
-
-            const splitMetrics = {
-                planned: plannedHours / assignees.length,
-                actuals: 0,
-            };
-            assignees.forEach((assignee) => {
-                const consultantId = Number((assignee as any)?.id ?? 0);
-                const consultantNameRaw = String((assignee as any)?.username ?? "");
-                const consultantNameKey = normalizeName(consultantNameRaw);
-                const consultantFirstKey = normalizeName((consultantNameRaw.split(/\s+/)[0] || ""));
-                const consultantKeys: string[] = [];
-                if (consultantId > 0) consultantKeys.push(`id:${consultantId}`);
-                if (consultantNameKey) consultantKeys.push(`name:${consultantNameKey}`);
-                if (consultantFirstKey) consultantKeys.push(`first:${consultantFirstKey}`);
-
-                consultantKeys.forEach((consultantKey) => {
-                    if (listNameKey) {
-                        addListName(consultantKey, listNameKey, splitMetrics);
-                    }
-                    clientKeys.forEach((clientKey) => {
-                        add(consultantKey, clientKey, splitMetrics);
-                    });
-                });
-            });
-        });
-
-        return {
-            exactMap,
-            byConsultantListName,
-        };
-    }, [tasks, activeWeekStr]);
-
-    const getClickupMetricsForCell = useCallback((row: CapacityGridRow, resource: CapacityGridResource): ClickUpCellMetrics => {
-        const consultantId = Number(resource.consultantId ?? 0);
-        const consultantName = String(resource.name || "");
-        const consultantNameKey = normalizeName(consultantName);
-        const consultantFirstKey = normalizeName((consultantName.split(/\s+/)[0] || ""));
-        const consultantKeys: string[] = [];
-        if (consultantId > 0) consultantKeys.push(`id:${consultantId}`);
-        if (consultantNameKey) consultantKeys.push(`name:${consultantNameKey}`);
-        if (consultantFirstKey) consultantKeys.push(`first:${consultantFirstKey}`);
-
-        const rowIdKey = normalizeName(String(row.id || ""));
-        const rowNameKey = normalizeName(String(row.client || ""));
-        const clientKeys: string[] = [];
-        if (rowIdKey) clientKeys.push(`id:${rowIdKey}`);
-        if (rowNameKey) clientKeys.push(`name:${rowNameKey}`);
-
-        for (const consultantKey of consultantKeys) {
-            for (const clientKey of clientKeys) {
-                const hit = clickupMetricsByPair.exactMap.get(`${consultantKey}|${clientKey}`);
-                if (hit) return hit;
-            }
-        }
-
-        // Fallback match: if the row uses a grouped/shortened client label
-        // (e.g. "SodaStream"), sum matching ClickUp list-name buckets.
-        const primaryConsultantKey = consultantKeys[0];
-        const rowClientNorm = rowNameKey;
-        if (primaryConsultantKey && rowClientNorm) {
-            const byListName = clickupMetricsByPair.byConsultantListName.get(primaryConsultantKey);
-            if (byListName && rowClientNorm.length >= 4) {
-                let planned = 0;
-                let actuals = 0;
-                let found = false;
-                byListName.forEach((listMetrics, listNameNorm) => {
-                    if (
-                        listNameNorm === rowClientNorm
-                        || listNameNorm.includes(rowClientNorm)
-                        || rowClientNorm.includes(listNameNorm)
-                    ) {
-                        planned += Number(listMetrics?.planned || 0);
-                        actuals += Number(listMetrics?.actuals || 0);
-                        found = true;
-                    }
-                });
-                if (found) return { planned, actuals };
-            }
-        }
-
-        return { planned: 0, actuals: 0 };
-    }, [clickupMetricsByPair]);
-
     const actualsByResource = useMemo(() => {
         const result: Record<string, number> = {};
         visibleResources.forEach((resource) => {
@@ -963,81 +839,6 @@ export function CapacityGrid({
     const totalActuals = useMemo(() => {
         return Object.values(actualsByResource).reduce((sum, value) => sum + Number(value ?? 0), 0);
     }, [actualsByResource]);
-
-    const clickupSeedPlan = useMemo(() => {
-        const ops: Array<{ rowId: string; resourceId: string; hours: number }> = [];
-
-        rows.forEach((row) => {
-            visibleResources.forEach((resource) => {
-                const clickup = getClickupMetricsForCell(row, resource);
-                const currentHours = Number(row.allocations[resource.id]?.hours ?? 0);
-                if (currentHours > 0.05) return;
-                const taskEstimateHours = Number(getTaskEstimateForCell(row, resource) || 0);
-                const seedHours = Number(Number((Number(clickup.planned || 0) + taskEstimateHours)).toFixed(1));
-                if (seedHours <= 0.05) return;
-                if (Math.abs(seedHours - currentHours) < 0.05) return;
-
-                ops.push({
-                    rowId: row.id,
-                    resourceId: resource.id,
-                    hours: seedHours,
-                });
-            });
-        });
-
-        const key = `${activeWeekStr}|${ops
-            .map((op) => `${op.rowId}:${op.resourceId}:${op.hours}`)
-            .join("|")}`;
-        return { ops, key };
-    }, [activeWeekStr, getClickupMetricsForCell, getTaskEstimateForCell, rows, visibleResources]);
-
-    useEffect(() => {
-        if (rows.length === 0 || visibleResources.length === 0) return;
-        if (clickupSeedPlan.ops.length === 0) return;
-
-        const currentWeekStr = format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
-        if (activeWeekStr < currentWeekStr) return;
-        if (autoFillRunKeyRef.current === clickupSeedPlan.key) return;
-
-        const opMap = new Map<string, { hours: number }>();
-        clickupSeedPlan.ops.forEach((op) => {
-            opMap.set(`${op.rowId}|${op.resourceId}`, { hours: op.hours });
-        });
-
-        let changed = false;
-        const nextRows = rows.map((row) => {
-            let rowChanged = false;
-            const nextAllocations = { ...row.allocations };
-
-            visibleResources.forEach((resource) => {
-                const op = opMap.get(`${row.id}|${resource.id}`);
-                if (!op) return;
-
-                const currentHours = Number(row.allocations[resource.id]?.hours ?? 0);
-                const nextHours = Number(op.hours ?? currentHours);
-
-                if (Math.abs(nextHours - currentHours) < 0.05) {
-                    return;
-                }
-
-                nextAllocations[resource.id] = {
-                    ...row.allocations[resource.id],
-                    hours: nextHours,
-                    source: "clickup",
-                };
-                rowChanged = true;
-                changed = true;
-            });
-
-            return rowChanged ? { ...row, allocations: nextAllocations } : row;
-        });
-
-        autoFillRunKeyRef.current = clickupSeedPlan.key;
-        if (!changed) return;
-
-        setRows(nextRows);
-        persist(nextRows);
-    }, [activeWeekStr, rows, visibleResources, clickupSeedPlan, persist]);
 
     const weekLabel = `${format(activeWeekDate, "MM/dd")} to ${format(addDays(activeWeekDate, 4), "MM/dd")}`;
     const currentWeekStart = startOfWeek(new Date(), { weekStartsOn: 1 });
@@ -1129,14 +930,14 @@ export function CapacityGrid({
                         Client Setup
                     </button>
                     <span className="rounded-full border border-border/50 bg-surface/20 px-3 py-1 text-[11px] text-text-muted">
-                        {isWeekLoading ? "Loading..." : isPending ? "Saving..." : "Persistent planning scratchboard"}
+                        {isWeekLoading ? "Loading..." : isPending ? "Saving..." : "Weekly client plan saved locally"}
                     </span>
                 </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
                 <div className={monochromeMetricCardClass}>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Consultant Actuals</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Billable Capacity</div>
                     <div className="mt-2 text-3xl font-bold text-white">{totalCapacity.toFixed(1)}</div>
                 </div>
                 <div className={monochromeMetricCardClass}>
@@ -1190,7 +991,7 @@ export function CapacityGrid({
                                                 Planned {used.toFixed(1)}
                                             </span>
                                             <span className={cn("max-w-full text-center text-[10px] font-semibold leading-4 whitespace-nowrap", getConsultantHeaderDetailClass(resource.id))}>
-                                                Actuals {maxBillable.toFixed(1)}
+                                                Capacity {maxBillable.toFixed(1)}
                                             </span>
                                         </div>
                                     </th>
@@ -1208,8 +1009,8 @@ export function CapacityGrid({
                             const rowTotal = Number(stats?.total ?? 0);
                             const rowActualTotal = visibleResources.reduce((sum, resource) => sum + Number(getBillableActualsForCell(row, resource) ?? 0), 0);
                             const clientMeta = getClientMetadata(row);
-                            const rowMin = Number(clientMeta?.min ?? row.wkMin ?? 0);
-                            const rowMax = Number(clientMeta?.max ?? row.wkMax ?? 0);
+                            const rowMin = Number(row.wkMin ?? clientMeta?.min ?? 0);
+                            const rowMax = Number(row.wkMax ?? clientMeta?.max ?? 0);
                             const clientStatusClass = getClientStatusClass(rowTotal, rowMin, rowMax);
                             const laneClass = rowIndex % 2 === 0 ? "bg-[#0d121d]/72 hover:bg-[#12192a]/82" : "bg-[#101622]/78 hover:bg-[#151d30]/86";
                             const laneBorderClass = rowIndex % 2 === 0 ? "border-border/35" : "border-border/20";
@@ -1220,7 +1021,7 @@ export function CapacityGrid({
                                         <div className={cn("w-56 rounded-xl border border-white/[0.04] bg-white/[0.03] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]", clientStatusClass)}>
                                             <div className={cn("font-medium", rowMax > 0 && rowTotal > rowMax ? "text-red-400" : clientStatusClass)}>{clientMeta?.name ?? row.client}</div>
                                             <div className={cn("mt-1 text-[10px] uppercase tracking-[0.18em]", getClientMetaLineClass(rowTotal, rowMin, rowMax))}>
-                                                Team {(clientMeta?.team ?? row.team) || "-"} · {clientMeta?.sa || row.teamSa || "No SA"} · {clientMeta?.dealType || row.dealType || "No Deal Type"}
+                                                Team {(row.team ?? clientMeta?.team) || "-"} · {row.teamSa || clientMeta?.sa || "No SA"} · {row.dealType || clientMeta?.dealType || "No Deal Type"}
                                             </div>
                                             <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-text-muted">
                                                 Weekly Min {rowMin.toFixed(1)}h · Weekly Max {rowMax.toFixed(1)}h
@@ -1238,9 +1039,8 @@ export function CapacityGrid({
                                     {visibleResources.map((resource) => (
                                         <Fragment key={`${row.id}-${resource.id}`}>
                                             {(() => {
-                                                const clickup = getClickupMetricsForCell(row, resource);
                                                 const plannedHours = Number(row.allocations[resource.id]?.hours ?? 0);
-                                                const clickupHours = Number(clickup.planned || 0);
+                                                const taskEstimateHours = Number(getTaskEstimateForCell(row, resource) || 0);
                                                 const actualHours = Number(getBillableActualsForCell(row, resource) || 0);
                                                 const allocationNote = String(row.allocations[resource.id]?.note ?? "");
                                                 const clientBoardTarget = resolveClientBoardTarget(row, resource, resource.name);
@@ -1305,7 +1105,7 @@ export function CapacityGrid({
                                                                     }}
                                                                     onBlur={() => commitAllocationInput(row.id, resource.id)}
                                                                     onDoubleClick={() => handleEditAllocationNote(row.id, resource.id, row.client, resource.name)}
-                                                                    title={`ClickUp Planned: ${clickupHours.toFixed(1)}h | Logged Actuals: ${actualHours.toFixed(1)}h${noteHint}`}
+                                                                    title={`Task Estimate: ${taskEstimateHours.toFixed(1)}h | Logged Actuals: ${actualHours.toFixed(1)}h${noteHint}`}
                                                                     className={cn(
                                                                         "block h-9 min-w-0 rounded border px-2 py-1 text-right text-[12px] font-medium tabular-nums focus:border-border cursor-text",
                                                                         heatMapClass
@@ -1320,6 +1120,10 @@ export function CapacityGrid({
                                                                         {actualHours.toFixed(1)}
                                                                     </div>
                                                                 )}
+                                                            </div>
+                                                            <div className="flex items-center justify-between text-[9px] uppercase tracking-wide text-text-muted">
+                                                                <span>{taskEstimateHours > 0.05 ? `Task Est ${taskEstimateHours.toFixed(1)}h` : "No Task Est"}</span>
+                                                                <span>{plannedHours > 0.05 ? `Plan ${plannedHours.toFixed(1)}h` : "Unplanned"}</span>
                                                             </div>
                                                         </div>
                                                     </td>
@@ -1368,7 +1172,7 @@ export function CapacityGrid({
                         </tr>
                         <tr className="border-t border-border/30 bg-surface/20">
                             <td className="px-3 py-2 font-semibold text-text-main border-r border-border/30">
-                                Consultant Actuals
+                                Billable Capacity
                             </td>
                             {visibleResources.map((resource) => (
                                 <td key={`cap-${resource.id}`} className="px-2 py-2 border-r border-border/20 text-center text-[11px] font-semibold text-slate-300">

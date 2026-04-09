@@ -1,5 +1,5 @@
 import { format, startOfWeek } from "date-fns";
-import type { ClickUpTask } from "@/lib/clickup";
+import type { ImportedTask } from "@/lib/imported-data";
 
 export type EditableTaskStatus = "backlog" | "open" | "closed";
 
@@ -139,7 +139,7 @@ export function getEffectiveEditableTaskStatus(
     return "backlog";
 }
 
-export function normalizeEditableStatusFromClickUp(task: ClickUpTask): EditableTaskStatus {
+export function normalizeEditableStatusFromImportedTask(task: ImportedTask): EditableTaskStatus {
     const statusText = String(task?.status?.status ?? "").toLowerCase();
     const statusType = String(task?.status?.type ?? "").toLowerCase();
     if (statusType === "closed" || /(complete|completed|done|closed|resolved|shipped)/.test(statusText)) return "closed";
@@ -147,21 +147,21 @@ export function normalizeEditableStatusFromClickUp(task: ClickUpTask): EditableT
     return "open";
 }
 
-export function getTaskCreatedWeekStr(task: ClickUpTask, activeWeekStr: string): string {
+export function getTaskCreatedWeekStr(task: ImportedTask, activeWeekStr: string): string {
     const createdDate = toValidDate(task?.date_created);
     if (createdDate) return toWeekStartStr(createdDate);
     return activeWeekStr;
 }
 
-export function getTaskClosedDateStr(task: ClickUpTask): string {
+export function getTaskClosedDateStr(task: ImportedTask): string {
     const closedDate = toValidDate(task?.date_closed);
     return closedDate ? format(closedDate, "yyyy-MM-dd") : "";
 }
 
-export function getTaskPlannedWeekStr(task: ClickUpTask, activeWeekStr: string): string {
+export function getTaskPlannedWeekStr(task: ImportedTask, activeWeekStr: string): string {
     const startDate = toValidDate(task?.start_date);
     const dueDate = toValidDate(task?.due_date);
-    const status = normalizeEditableStatusFromClickUp(task);
+    const status = normalizeEditableStatusFromImportedTask(task);
     const createdWeek = getTaskCreatedWeekStr(task, activeWeekStr);
 
     if (startDate && dueDate) {
@@ -174,7 +174,7 @@ export function getTaskPlannedWeekStr(task: ClickUpTask, activeWeekStr: string):
     return "";
 }
 
-export function buildEditableTaskSeedFromClickUp(task: ClickUpTask, activeWeekStr: string): EditableTaskSeedShape {
+export function buildEditableTaskSeedFromImportedTask(task: ImportedTask, activeWeekStr: string): EditableTaskSeedShape {
     const createdWeek = getTaskCreatedWeekStr(task, activeWeekStr);
     return {
         sourceTaskId: String(task.id),
@@ -187,6 +187,6 @@ export function buildEditableTaskSeedFromClickUp(task: ClickUpTask, activeWeekSt
         plannedWeek: getTaskPlannedWeekStr(task, activeWeekStr),
         closedDate: getTaskClosedDateStr(task),
         estimateHours: Number(((Number(task.time_estimate ?? 0) || 0) / (1000 * 60 * 60)).toFixed(2)),
-        status: normalizeEditableStatusFromClickUp(task),
+        status: normalizeEditableStatusFromImportedTask(task),
     };
 }

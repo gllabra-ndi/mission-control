@@ -1,8 +1,8 @@
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 import { TaskCard } from "./TaskCard";
 
 interface KanbanBoardProps {
-    groupedTasks: Record<string, ClickUpTask[]>;
+    groupedTasks: Record<string, ImportedTask[]>;
     columnOrder?: string[];
 }
 

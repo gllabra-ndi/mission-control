@@ -3,14 +3,14 @@
 import { useMemo, useState, useEffect, Suspense, use } from "react";
 import { useRouter } from "next/navigation";
 import { format, subWeeks, addWeeks, addDays, startOfWeek, startOfMonth, endOfMonth } from "date-fns";
-import { ClickUpTask, TimeEntry } from "@/lib/clickup";
+import { ImportedTask, TimeEntry } from "@/lib/imported-data";
 import { AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface CommandCenterProps {
-    tasksPromise?: Promise<ClickUpTask[]>;
+    tasksPromise?: Promise<ImportedTask[]>;
     timeEntriesPromise?: Promise<TimeEntry[]>;
-    tasks?: ClickUpTask[];
+    tasks?: ImportedTask[];
     timeEntries?: TimeEntry[];
     activeWeekStr: string;
     dbConfig: any;
@@ -82,7 +82,7 @@ function CommandMetrics({
     const stretchTarget = dbConfig?.weekConfig?.stretchTarget ?? 400;
 
     const tasksMap = useMemo(() => {
-        const map = new Map<string, ClickUpTask>();
+        const map = new Map<string, ImportedTask>();
         (tasks || []).forEach((t: any) => map.set(t.id, t));
         return map;
     }, [tasks]);
@@ -537,7 +537,7 @@ export function CommandCenter({ tasksPromise, timeEntriesPromise, tasks, timeEnt
                     </div>
 
                     <div className="text-xs text-text-muted bg-surface-hover px-3 py-1.5 rounded border border-border inline-flex">
-                        Auto-synced with ClickUp Time Entries
+                        Based on imported time history
                     </div>
                 </div>
             </div>

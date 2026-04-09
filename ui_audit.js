@@ -7,7 +7,7 @@ const puppeteer = require('puppeteer');
   await new Promise(r => setTimeout(r, 2000));
 
   await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => (b.textContent || '').includes('ClickUp Match'));
+    const btn = Array.from(document.querySelectorAll('button')).find(b => (b.textContent || '').includes('Task Estimate'));
     if (btn) btn.click();
   });
   await new Promise(r => setTimeout(r, 500));

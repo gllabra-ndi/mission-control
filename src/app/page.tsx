@@ -1,9 +1,9 @@
 import {
-    getTeamTasks,
-    getTeamTimeEntries,
-    getSpaceFoldersWithLists,
-    PROFESSIONAL_SERVICES_SPACE_ID
-} from "@/lib/clickup";
+    getImportedTasks,
+    getImportedTimeEntries,
+    getWorkspaceFoldersWithLists,
+    PRIMARY_WORKSPACE_ID
+} from "@/lib/imported-data";
 import { DashboardClient } from "@/components/DashboardClient";
 import { addDays, addWeeks, endOfYear, format, startOfWeek } from "date-fns";
 import {
@@ -106,9 +106,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         previousTaskBillableRollups,
         initialSidebarStructure
     ] = await Promise.all([
-        getTeamTasks(),
-        getSpaceFoldersWithLists(PROFESSIONAL_SERVICES_SPACE_ID, EXCLUDED_FOLDERS),
-        getTeamTimeEntries(yearStartMs, yearEndMs),
+        getImportedTasks(),
+        getWorkspaceFoldersWithLists(PRIMARY_WORKSPACE_ID, EXCLUDED_FOLDERS),
+        getImportedTimeEntries(yearStartMs, yearEndMs),
         getWeekConfig(weekStartStr),
         getWeekConfigsForYear(activeYear),
         getLeadConfigs(weekStartStr),
@@ -147,7 +147,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     });
 
     validTasks
-        .filter((task: any) => task.space?.id === PROFESSIONAL_SERVICES_SPACE_ID)
+        .filter((task: any) => task.space?.id === PRIMARY_WORKSPACE_ID)
         .forEach((task: any) => {
             if (!Array.isArray(task.assignees)) return;
             task.assignees.forEach((a: any) => {

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ClickUpTask, TimeEntry } from "@/lib/clickup";
+import { ImportedTask, TimeEntry } from "@/lib/imported-data";
 import { Download, ArrowRight, CheckCircle2, Circle, ChevronLeft, ChevronRight } from "lucide-react";
 import { startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, subWeeks, addWeeks, format } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -11,7 +11,7 @@ interface ClientDashboardProps {
     clientId: string;
     clientName: string;
     activeWeekStr: string;
-    tasks: ClickUpTask[];
+    tasks: ImportedTask[];
     timeEntries: TimeEntry[];
     clientOptions: { id: string | number; name: string }[];
     onSelectClient: (clientId: string) => void;
@@ -139,9 +139,9 @@ export function ClientDashboard({
     }, [tasks, timeEntriesInRange]);
 
     const categorizedTasks = useMemo(() => {
-        const backlog: ClickUpTask[] = [];
-        const inProgress: ClickUpTask[] = [];
-        const completed: ClickUpTask[] = [];
+        const backlog: ImportedTask[] = [];
+        const inProgress: ImportedTask[] = [];
+        const completed: ImportedTask[] = [];
 
         tasksInRange.forEach((task) => {
             const statusType = task.status.type.toLowerCase();

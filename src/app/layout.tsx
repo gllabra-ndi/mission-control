@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
     title: "Mission Control",
-    description: "ClickUp Dashboard with a Linear aesthetic",
+    description: "Mission Control workspace with a Linear aesthetic",
 };
 
 export default function RootLayout({

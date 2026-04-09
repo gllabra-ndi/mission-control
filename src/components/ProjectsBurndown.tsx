@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 
 interface ProjectOption {
     id: string;
@@ -9,7 +9,7 @@ interface ProjectOption {
 }
 
 interface ProjectsBurndownProps {
-    tasks: ClickUpTask[];
+    tasks: ImportedTask[];
     projectOptions: ProjectOption[];
 }
 
@@ -26,7 +26,7 @@ const MONTH_LOOKBACK_LIMIT = 12;
 const monthFmtUtc = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
 const monthYearFmtUtc = new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
 
-function toEffortHours(task: ClickUpTask): number {
+function toEffortHours(task: ImportedTask): number {
     if (task.time_estimate && task.time_estimate > 0) {
         return task.time_estimate / (1000 * 60 * 60);
     }
@@ -42,14 +42,14 @@ function parseTimestampMs(value: string | null | undefined): number | null {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function isDoneStatus(task: ClickUpTask): boolean {
+function isDoneStatus(task: ImportedTask): boolean {
     const statusType = String(task.status?.type ?? "").toLowerCase();
     const statusLabel = String(task.status?.status ?? "");
     if (statusType === "closed" || statusType === "done") return true;
     return /(done|complete|completed|closed|resolved)/i.test(statusLabel);
 }
 
-function taskCompletionMs(task: ClickUpTask): number | null {
+function taskCompletionMs(task: ImportedTask): number | null {
     const closedMs = parseTimestampMs(task.date_closed);
     if (closedMs !== null) return closedMs;
 
@@ -77,7 +77,7 @@ function addUtcMonths(monthStartMs: number, offset: number): number {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + offset, 1);
 }
 
-function buildDrillTask(task: ClickUpTask, effort: number): DrillTask {
+function buildDrillTask(task: ImportedTask, effort: number): DrillTask {
     return {
         id: task.id,
         name: task.name,
@@ -228,7 +228,7 @@ export function ProjectsBurndown({ tasks, projectOptions }: ProjectsBurndownProp
     if (projectOptions.length === 0) {
         return (
             <div className="border border-border/50 bg-surface/20 rounded-xl p-6 text-sm text-text-muted">
-                No project lists are available yet in ClickUp for burndown tracking.
+                No project lists are available yet for burndown tracking.
             </div>
         );
     }

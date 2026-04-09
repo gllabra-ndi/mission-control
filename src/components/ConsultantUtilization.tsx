@@ -397,7 +397,7 @@ export function ConsultantUtilization({
                         ? row.allocations
                         : {
                             ...(row.allocations ?? {}),
-                            [newResource.id]: { hours: 0, source: "manual", note: "" },
+                            [newResource.id]: { hours: 0, source: "empty", note: "" },
                         },
                 }));
 

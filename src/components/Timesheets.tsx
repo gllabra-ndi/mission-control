@@ -15,14 +15,14 @@ import {
     getEditableTasks,
     updateEditableTaskBillableEntry,
 } from "@/app/actions";
-import { ClickUpTask } from "@/lib/clickup";
-import { buildEditableTaskSeedFromClickUp, isEditableTaskVisibleInWeek } from "@/lib/editableTaskLifecycle";
+import { ImportedTask } from "@/lib/imported-data";
+import { buildEditableTaskSeedFromImportedTask, isEditableTaskVisibleInWeek } from "@/lib/editableTaskLifecycle";
 import { cn } from "@/lib/utils";
 import type { FolderWithLists } from "@/components/Sidebar";
 
 interface TimesheetsProps {
     activeWeekStr: string;
-    tasks: ClickUpTask[];
+    tasks: ImportedTask[];
     consultants: Array<{ id: number; name: string }>;
     capacityGrid: CapacityGridPayload;
     folders?: FolderWithLists[];
@@ -77,19 +77,24 @@ function formatInputHours(value: number) {
     return String(Number(value.toFixed(2)));
 }
 
-function buildSeedTasks(tasks: ClickUpTask[], activeWeekStr: string): EditableTaskSeed[] {
+function buildSeedTasks(tasks: ImportedTask[], activeWeekStr: string): EditableTaskSeed[] {
     return tasks
-        .map((task) => buildEditableTaskSeedFromClickUp(task, activeWeekStr))
+        .map((task) => buildEditableTaskSeedFromImportedTask(task, activeWeekStr))
         .filter((task) => isEditableTaskVisibleInWeek(task, activeWeekStr));
 }
 
-function getTaskScopeCandidates(task: ClickUpTask | null) {
+function getTaskScopeCandidates(task: ImportedTask | null) {
     return [
         String(task?.list?.id ?? "").trim(),
         String(task?.list?.name ?? "").trim(),
         String(task?.project?.name ?? "").trim(),
         String(task?.folder?.name ?? "").trim(),
     ].filter(Boolean);
+}
+
+function getFolderNameById(folders: FolderWithLists[], folderId: string) {
+    const match = folders.find((folder) => String(folder.id ?? "").trim() === folderId);
+    return String(match?.name ?? "").trim();
 }
 
 function getDayHours(entries: EditableTaskBillableEntryRecord[]) {
@@ -185,7 +190,7 @@ export function Timesheets({
     }, [activeWeekStr, seedTasks, weekDataVersion]);
 
     const sourceTaskById = useMemo(() => {
-        const byId = new Map<string, ClickUpTask>();
+        const byId = new Map<string, ImportedTask>();
         tasks.forEach((task) => {
             const id = String(task?.id ?? "").trim();
             if (!id) return;
@@ -257,8 +262,37 @@ export function Timesheets({
     }, [capacityGrid, capacityRows, selectedConsultant]);
 
     const resolveClientMeta = useMemo(() => {
-        return (task: ClickUpTask | null) => {
-            const listId = String(task?.list?.id ?? "").trim();
+        return (editableTask: EditableTaskRecord, sourceTask: ImportedTask | null) => {
+            const scopeType = String(editableTask?.scopeType ?? "").trim();
+            const scopeId = String(editableTask?.scopeId ?? "").trim();
+
+            if (scopeType === "list" && scopeId) {
+                const boardMatch = boardClientByScope.byListId.get(scopeId) ?? boardClientByScope.byListName.get(normalizeName(scopeId));
+                if (boardMatch) {
+                    const canonicalClient = clientDirectoryLookup.byId.get(boardMatch.clientId);
+                    return {
+                        clientId: boardMatch.clientId,
+                        clientLabel: canonicalClient?.name || boardMatch.clientName,
+                    };
+                }
+            }
+
+            if (scopeType === "folder" && scopeId) {
+                const folderName = getFolderNameById(folders, scopeId) || scopeId;
+                const directoryMatch = clientDirectoryLookup.byId.get(normalizeName(scopeId)) ?? clientDirectoryLookup.byName.get(normalizeName(folderName));
+                if (directoryMatch) {
+                    return {
+                        clientId: directoryMatch.id,
+                        clientLabel: directoryMatch.name,
+                    };
+                }
+                return {
+                    clientId: `name:${normalizeName(folderName) || "unassigned-client"}`,
+                    clientLabel: folderName || "Unassigned Client",
+                };
+            }
+
+            const listId = String(sourceTask?.list?.id ?? "").trim();
             const directBoardMatch = listId ? boardClientByScope.byListId.get(listId) : null;
             if (directBoardMatch) {
                 const canonicalClient = clientDirectoryLookup.byId.get(directBoardMatch.clientId);
@@ -268,7 +302,7 @@ export function Timesheets({
                 };
             }
 
-            const candidates = getTaskScopeCandidates(task);
+            const candidates = getTaskScopeCandidates(sourceTask);
             for (const candidate of candidates) {
                 const normalized = normalizeName(candidate);
                 const boardMatch = boardClientByScope.byListName.get(normalized);
@@ -288,19 +322,24 @@ export function Timesheets({
                 }
             }
 
-            const firstLabel = candidates[1] || candidates[2] || candidates[3] || "Unassigned Client";
+            const fallbackScopeLabel = scopeType === "list"
+                ? scopeId
+                : scopeType === "folder"
+                    ? (getFolderNameById(folders, scopeId) || scopeId)
+                    : "";
+            const firstLabel = fallbackScopeLabel || candidates[1] || candidates[2] || candidates[3] || "Unassigned Client";
             return {
                 clientId: `name:${normalizeName(firstLabel) || "unassigned-client"}`,
                 clientLabel: firstLabel,
             };
         };
-    }, [boardClientByScope.byListId, boardClientByScope.byListName, clientDirectoryLookup.byId, clientDirectoryLookup.byName]);
+    }, [boardClientByScope.byListId, boardClientByScope.byListName, clientDirectoryLookup.byId, clientDirectoryLookup.byName, folders]);
 
     const taskRows = useMemo<TimesheetTaskRow[]>(() => {
         return visibleTasks
             .map((task) => {
                 const sourceTask = task.sourceTaskId ? sourceTaskById.get(String(task.sourceTaskId)) ?? null : null;
-                const clientMeta = resolveClientMeta(sourceTask);
+                const clientMeta = resolveClientMeta(task, sourceTask);
                 const dayEntriesByDate = weekdays.reduce<Record<string, EditableTaskBillableEntryRecord[]>>((acc, weekday) => {
                     acc[weekday.key] = (task.billableEntries || [])
                         .filter((entry) => entry.entryDate === weekday.key)
@@ -624,7 +663,7 @@ export function Timesheets({
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Planned This Week</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Client Plan This Week</div>
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.plannedHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
@@ -632,14 +671,14 @@ export function Timesheets({
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.actualsHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-primary/30 bg-[linear-gradient(180deg,rgba(29,39,69,0.98)_0%,rgba(16,24,44,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining Planned</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining Client Plan</div>
                     <div className="mt-2 text-5xl font-bold text-white">{overallSummary.remainingHours.toFixed(1)}</div>
                     <div className="mt-2 text-xs text-text-muted">Grouped by client, with Monday through Friday entry cells per task.</div>
                 </div>
             </div>
 
             <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-4 text-xs text-text-muted shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                This grid uses the Plan vs Actuals client plan as the weekly target, groups tasks under their canonical client, and suggests weekday entries from each client&apos;s current actual pattern.
+                This grid uses the weekly client plan from Plan vs Actuals as the target, groups local editable tasks under their canonical client, and suggests weekday entries from each client&apos;s current actual pattern.
             </div>
 
             {clientGroups.length === 0 && (
@@ -663,8 +702,8 @@ export function Timesheets({
                                     <div className="mt-1 text-xs text-text-muted">{group.tasks.length} active task{group.tasks.length === 1 ? "" : "s"} for {selectedConsultant || "this consultant"}</div>
                                 </div>
                                 <div className="flex items-center gap-3 flex-wrap">
-                                    <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
-                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Planned</div>
+                                        <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
+                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Client Plan</div>
                                         <div className="mt-1 text-xl font-semibold text-white">{group.plannedHours.toFixed(1)}</div>
                                     </div>
                                     <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">

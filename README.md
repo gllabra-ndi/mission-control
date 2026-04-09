@@ -6,7 +6,7 @@ Mission Control is a Next.js operations dashboard for office-wide planning acros
 - consultant utilization
 - editable weekly task boards
 - client pacing
-- ClickUp-backed workflow visibility
+- local workspace workflow visibility
 
 ## Local Development
 
@@ -55,8 +55,6 @@ Notes:
 ## Required Environment Variables
 
 - `DATABASE_URL`
-- `CLICKUP_API_KEY`
-- `CLICKUP_TEAM_ID`
 
 Optional NetSuite integration variables:
 
@@ -191,7 +189,7 @@ SQLite is fine for local development, but not the right long-term choice for a m
 ### Next
 
 1. Expand role-based privilege enforcement deeper across editable screens
-2. Add background ClickUp sync so the UI reads from local data instead of pulling everything live
+2. Expand local task and timesheet automation around the editable workspace
 3. Add backups, monitoring, and audit tracking for office edits
 
 ## Deployment Checklist
@@ -201,7 +199,7 @@ SQLite is fine for local development, but not the right long-term choice for a m
 1. Create a Postgres database
 2. Set `DATABASE_URL` in production
 3. Run Prisma schema sync or migrations
-4. Set ClickUp secrets
+4. Verify office authentication variables
 5. Verify `/api/health`
 6. Test with a small pilot group before opening to the full office
 

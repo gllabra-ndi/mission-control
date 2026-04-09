@@ -3,7 +3,7 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Mail, RefreshCcw, Shield, Trash2, UserPlus } from "lucide-react";
-import { deactivateProvisionedUser, inviteAppUser, resendAppUserInvite, syncClickUpConsultantsAndUsers, type AppUserRecord, type ConsultantRecord, updateAppUserRole } from "@/app/actions";
+import { deactivateProvisionedUser, inviteAppUser, resendAppUserInvite, syncConsultantsAndUsers, type AppUserRecord, type ConsultantRecord, updateAppUserRole } from "@/app/actions";
 import { APP_ROLE_ORDER, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
 interface UserAccessSettingsProps {
     initialUsers: AppUserRecord[];
@@ -115,7 +115,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
         startTransition(async () => {
             try {
                 setActionUserId("sync:roster");
-                await syncClickUpConsultantsAndUsers();
+                await syncConsultantsAndUsers();
                 router.refresh();
             } catch (err) {
                 setError(err instanceof Error ? err.message : "Unable to refresh consultant roster right now.");

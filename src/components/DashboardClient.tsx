@@ -14,12 +14,13 @@ import { Trends } from "@/components/Trends";
 import { CapacityTrends } from "@/components/CapacityTrends";
 import { ClientDashboard } from "@/components/ClientDashboard";
 import { CapacityGridPayload, ClientDirectoryRecord, EditableTaskBillableRollupRecord, EditableTaskPlannedRollupRecord, TaskSidebarStructureRecord, loadDashboardWeekData } from "@/app/actions";
-import { ClickUpTask, TimeEntry, PROFESSIONAL_SERVICES_SPACE_ID } from "@/lib/clickup";
+import { ImportedTask, TimeEntry, PRIMARY_WORKSPACE_ID } from "@/lib/imported-data";
+import type { SidebarSource } from "@/lib/legacySources";
 import { Rocket } from "lucide-react";
 import { MissionEngineMark } from "@/components/BrandMarks";
 
 interface DashboardClientProps {
-    initialTasks: ClickUpTask[];
+    initialTasks: ImportedTask[];
     initialFolders: FolderWithLists[];
     initialTimeEntries: TimeEntry[];
     isError: boolean;
@@ -196,7 +197,7 @@ export function DashboardClient({
 
     // Filter tasks down strictly to the Professional Services space
     const proServicesTasks = useMemo(() => {
-        return initialTasks.filter(t => t.space?.id === PROFESSIONAL_SERVICES_SPACE_ID);
+        return initialTasks.filter(t => t.space?.id === PRIMARY_WORKSPACE_ID);
     }, [initialTasks]);
 
     const clientOptions = useMemo<ClientOption[]>(() => {
@@ -250,14 +251,14 @@ export function DashboardClient({
             return bestMatch ? { id: bestMatch.id, name: bestMatch.name } : null;
         };
 
-        const folderCatalog = new Map<string, { id: string; name: string; source: "clickup" | "local" }>();
+        const folderCatalog = new Map<string, { id: string; name: string; source: SidebarSource }>();
         initialFolders.forEach((folder) => {
             if (hiddenFolderIds.has(String(folder.id))) return;
-            const override = folderOverrideMap.get(`clickup:${String(folder.id)}`);
+            const override = folderOverrideMap.get(`seeded:${String(folder.id)}`);
             folderCatalog.set(String(folder.id), {
                 id: String(folder.id),
                 name: String(override?.name ?? folder.name),
-                source: "clickup",
+                source: "seeded",
             });
         });
         (initialSidebarStructure?.folders ?? []).forEach((folder) => {
@@ -270,7 +271,7 @@ export function DashboardClient({
             });
         });
 
-        // Reconstruct missing folders from placements when ClickUp API is unavailable.
+        // Reconstruct missing folders from saved placements when imported workspace metadata is unavailable.
         // First pass: group placements by parentFolderId to derive the best folder name.
         const placementsByFolder = new Map<string, Array<{ boardName: string | null; clientName: string | null }>>();
         (initialSidebarStructure?.placements ?? []).forEach((placement) => {
@@ -282,7 +283,7 @@ export function DashboardClient({
         });
         placementsByFolder.forEach((items, folderId) => {
             if (folderCatalog.has(folderId) || hiddenFolderIds.has(folderId)) return;
-            const override = folderOverrideMap.get(`clickup:${folderId}`) ?? folderOverrideMap.get(`local:${folderId}`);
+            const override = folderOverrideMap.get(`seeded:${folderId}`) ?? folderOverrideMap.get(`local:${folderId}`);
             let derivedName = override?.name ?? null;
             if (!derivedName) {
                 // Derive name from client names: if all share a prefix, use it; otherwise list unique clients
@@ -303,7 +304,7 @@ export function DashboardClient({
             folderCatalog.set(folderId, {
                 id: folderId,
                 name: String(derivedName),
-                source: "clickup",
+                source: "seeded",
             });
         });
 
@@ -312,7 +313,7 @@ export function DashboardClient({
             Array<{
                 id: string;
                 name: string;
-                source: "clickup" | "local";
+                source: SidebarSource;
                 statusOrder?: string[];
                 clientId?: string | null;
                 clientName?: string | null;
@@ -323,7 +324,7 @@ export function DashboardClient({
         const pushBoard = (board: {
             id: string;
             name: string;
-            source: "clickup" | "local";
+            source: SidebarSource;
             defaultFolderId: string;
             defaultOrder: number;
             statusOrder?: string[];
@@ -356,7 +357,7 @@ export function DashboardClient({
                     pushBoard({
                         id: String(list.id),
                         name: String(list.name),
-                        source: "clickup",
+                        source: "seeded",
                         defaultFolderId: String(folder.id),
                         defaultOrder: index,
                         statusOrder: list.statusOrder,
@@ -377,7 +378,7 @@ export function DashboardClient({
                 });
             });
 
-        // Push boards from placements when ClickUp API boards are unavailable
+        // Push boards from saved placements when imported workspace boards are unavailable
         (initialSidebarStructure?.placements ?? []).forEach((placement) => {
             const boardId = String(placement.boardId ?? "");
             const folderId = String(placement.parentFolderId ?? "");
@@ -387,7 +388,7 @@ export function DashboardClient({
             pushBoard({
                 id: boardId,
                 name: String(placement.boardName ?? boardId),
-                source: placement.source === "local" ? "local" : "clickup",
+                source: placement.source === "local" ? "local" : "seeded",
                 defaultFolderId: folderId,
                 defaultOrder: Number(placement.orderIndex ?? 0),
             });
@@ -413,7 +414,7 @@ export function DashboardClient({
 
         if (initialFolders.length > 0) {
             const includedFolderIds = new Set<string>();
-            const clickupFolders = initialFolders
+            const seededFolders = initialFolders
                 .filter((folder) => !hiddenFolderIds.has(String(folder.id)))
                 .map((folder) => buildFolder(String(folder.id)))
                 .filter((folder): folder is FolderWithLists => {
@@ -429,13 +430,13 @@ export function DashboardClient({
                     includedFolderIds.add(folder.id);
                     return true;
                 });
-            // Build folders that exist only in placements (not in ClickUp API or local DB folders)
+            // Build folders that exist only in placements (not in imported metadata or local DB folders)
             const placementFolders = Array.from(folderCatalog.keys())
                 .filter((folderId) => !includedFolderIds.has(folderId))
                 .map((folderId) => buildFolder(folderId))
                 .filter((folder): folder is FolderWithLists => folder !== null);
 
-            const allFolders = [...clickupFolders, ...localFolders, ...placementFolders];
+            const allFolders = [...seededFolders, ...localFolders, ...placementFolders];
             return allFolders.sort((a, b) => {
                 const aName = a.name.toUpperCase();
                 const bName = b.name.toUpperCase();
@@ -451,7 +452,7 @@ export function DashboardClient({
             });
         }
 
-        const folderMap = new Map<string, { id: string, name: string, source: "clickup", lists: Map<string, { id: string, name: string, statusOrder: string[], source: "clickup" }> }>();
+        const folderMap = new Map<string, { id: string, name: string, source: "seeded", lists: Map<string, { id: string, name: string, statusOrder: string[], source: "seeded" }> }>();
         proServicesTasks.forEach((task) => {
             if (!task.folder?.id || !task.folder?.name) return;
             if (hiddenFolderIds.has(String(task.folder.id))) return;
@@ -459,7 +460,7 @@ export function DashboardClient({
                 folderMap.set(task.folder.id, {
                     id: task.folder.id,
                     name: task.folder.name,
-                    source: "clickup",
+                    source: "seeded",
                     lists: new Map()
                 });
             }
@@ -469,7 +470,7 @@ export function DashboardClient({
                     id: task.list.id,
                     name: task.list.name,
                     statusOrder: [],
-                    source: "clickup",
+                    source: "seeded",
                 });
             }
         });
@@ -479,7 +480,7 @@ export function DashboardClient({
                 pushBoard({
                     id: String(list.id),
                     name: String(list.name),
-                    source: "clickup",
+                    source: "seeded",
                     defaultFolderId: String(folder.id),
                     defaultOrder: index,
                     statusOrder: list.statusOrder,
@@ -488,7 +489,7 @@ export function DashboardClient({
         });
 
         const includedFolderIds = new Set<string>();
-        const clickupFolders = Array.from(folderMap.values())
+        const seededFolders = Array.from(folderMap.values())
             .map((folder) => buildFolder(String(folder.id)))
             .filter((folder): folder is FolderWithLists => {
                 if (!folder) return false;
@@ -502,13 +503,13 @@ export function DashboardClient({
                 includedFolderIds.add(folder.id);
                 return true;
             });
-        // Build folders that exist only in placements (not in ClickUp task data or local DB folders)
+        // Build folders that exist only in placements (not in imported task data or local DB folders)
         const placementFolders = Array.from(folderCatalog.keys())
             .filter((folderId) => !includedFolderIds.has(folderId))
             .map((folderId) => buildFolder(folderId))
             .filter((folder): folder is FolderWithLists => folder !== null);
 
-        const allFolders = [...clickupFolders, ...localFolders, ...placementFolders];
+        const allFolders = [...seededFolders, ...localFolders, ...placementFolders];
         return allFolders.sort((a, b) => {
             const aName = a.name.toUpperCase();
             const bName = b.name.toUpperCase();
@@ -1017,7 +1018,7 @@ export function DashboardClient({
                 {isError && (
                     <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-4 mx-6 mt-6 rounded-lg text-sm flex items-center gap-2">
                         <Rocket className="w-4 h-4" />
-                        <span>Connection Error: ClickUp API Key missing or invalid. Displaying empty state.</span>
+                        <span>Imported task bridge removed. Displaying local workspace data only.</span>
                     </div>
                 )}
 

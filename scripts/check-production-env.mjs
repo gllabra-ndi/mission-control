@@ -1,7 +1,5 @@
 const requiredAlways = [
   "DATABASE_URL",
-  "CLICKUP_API_KEY",
-  "CLICKUP_TEAM_ID",
 ];
 
 const requiredWhenAuthEnabled = [

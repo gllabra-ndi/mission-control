@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ClickUpTask } from "@/lib/clickup";
+import { ImportedTask } from "@/lib/imported-data";
 
 interface ProjectOption {
     id: string;
@@ -9,7 +9,7 @@ interface ProjectOption {
 }
 
 interface ProjectsBacklogGrowthProps {
-    tasks: ClickUpTask[];
+    tasks: ImportedTask[];
     projectOptions: ProjectOption[];
 }
 
@@ -32,7 +32,7 @@ function parseTimestampMs(value: string | null | undefined): number | null {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function toEffortHours(task: ClickUpTask): number {
+function toEffortHours(task: ImportedTask): number {
     if (task.time_estimate && task.time_estimate > 0) {
         return task.time_estimate / (1000 * 60 * 60);
     }
@@ -57,7 +57,7 @@ function addUtcMonths(monthStartMs: number, offset: number): number {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + offset, 1);
 }
 
-function buildDrillTask(task: ClickUpTask, effort: number): DrillTask {
+function buildDrillTask(task: ImportedTask, effort: number): DrillTask {
     return {
         id: task.id,
         name: task.name,
@@ -66,7 +66,7 @@ function buildDrillTask(task: ClickUpTask, effort: number): DrillTask {
     };
 }
 
-function isCompletedTask(task: ClickUpTask) {
+function isCompletedTask(task: ImportedTask) {
     const statusText = String(task.status?.status ?? "").toLowerCase();
     const statusType = String(task.status?.type ?? "").toLowerCase();
     return statusType === "closed" || /(complete|completed|done|closed|resolved|shipped)/.test(statusText);
@@ -220,7 +220,7 @@ export function ProjectsBacklogGrowth({ tasks, projectOptions }: ProjectsBacklog
     if (projectOptions.length === 0) {
         return (
             <div className="border border-border/50 bg-surface/20 rounded-xl p-6 text-sm text-text-muted">
-                No project lists are available yet in ClickUp for backlog growth tracking.
+                No project lists are available yet for backlog growth tracking.
             </div>
         );
     }

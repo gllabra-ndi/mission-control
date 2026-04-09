@@ -34,12 +34,13 @@ import {
     updateTaskSidebarFolder,
 } from "@/app/actions";
 import { MissionControlMark } from "@/components/BrandMarks";
+import type { SidebarSource } from "@/lib/legacySources";
 
 export interface FolderWithLists {
     id: string;
     name: string;
-    source?: "clickup" | "local";
-    lists: { id: string; name: string; statusOrder?: string[]; source?: "clickup" | "local"; clientId?: string | null; clientName?: string | null }[];
+    source?: SidebarSource;
+    lists: { id: string; name: string; statusOrder?: string[]; source?: SidebarSource; clientId?: string | null; clientName?: string | null }[];
 }
 
 interface SidebarClientOption {
@@ -103,13 +104,13 @@ export function Sidebar({
     const [createBoardTarget, setCreateBoardTarget] = useState<{ folderId: string; folderName: string } | null>(null);
     const [newBoardName, setNewBoardName] = useState("");
     const [newBoardClientId, setNewBoardClientId] = useState("");
-    const [editFolderTarget, setEditFolderTarget] = useState<{ id: string; name: string; source: "clickup" | "local" } | null>(null);
+    const [editFolderTarget, setEditFolderTarget] = useState<{ id: string; name: string; source: SidebarSource } | null>(null);
     const [editFolderName, setEditFolderName] = useState("");
-    const [editBoardTarget, setEditBoardTarget] = useState<{ id: string; name: string; source: "clickup" | "local"; parentFolderId: string; clientId?: string | null; clientName?: string | null } | null>(null);
+    const [editBoardTarget, setEditBoardTarget] = useState<{ id: string; name: string; source: SidebarSource; parentFolderId: string; clientId?: string | null; clientName?: string | null } | null>(null);
     const [editBoardName, setEditBoardName] = useState("");
     const [editBoardClientId, setEditBoardClientId] = useState("");
     const [deleteTarget, setDeleteTarget] = useState<{ type: "folder" | "board"; id: string; name: string; parentFolderId?: string | null } | null>(null);
-    const [draggingBoard, setDraggingBoard] = useState<{ id: string; name: string; source: "clickup" | "local"; parentFolderId: string; clientId?: string | null; clientName?: string | null } | null>(null);
+    const [draggingBoard, setDraggingBoard] = useState<{ id: string; name: string; source: SidebarSource; parentFolderId: string; clientId?: string | null; clientName?: string | null } | null>(null);
     const [dropPreview, setDropPreview] = useState<{ folderId: string; boardId?: string | null; position: "inside" | "before" | "after" } | null>(null);
     const router = useRouter();
 
@@ -362,7 +363,7 @@ export function Sidebar({
                 boardName: String(list.name ?? ""),
                 clientId: list.clientId == null ? null : String(list.clientId),
                 clientName: list.clientName == null ? null : String(list.clientName),
-                source: list.source === "local" ? "local" as const : "clickup" as const,
+                source: list.source === "local" ? "local" as const : "seeded" as const,
             }));
     };
 
@@ -374,7 +375,7 @@ export function Sidebar({
                 boardName: String(list.name ?? ""),
                 clientId: list.clientId == null ? null : String(list.clientId),
                 clientName: list.clientName == null ? null : String(list.clientName),
-                source: list.source === "local" ? "local" as const : "clickup" as const,
+                source: list.source === "local" ? "local" as const : "seeded" as const,
             })),
         }));
 
@@ -643,7 +644,7 @@ export function Sidebar({
                                                     setEditFolderTarget({
                                                         id: folder.id,
                                                         name: folder.name,
-                                                        source: folder.source === "local" ? "local" : "clickup",
+                                                        source: folder.source === "local" ? "local" : "seeded",
                                                     });
                                                 }}
                                                 className="inline-flex items-center justify-center rounded border border-transparent p-1 text-text-muted hover:border-border/60 hover:bg-surface-hover hover:text-white"
@@ -672,7 +673,7 @@ export function Sidebar({
                                                     setDraggingBoard({
                                                         id: list.id,
                                                         name: list.name,
-                                                        source: list.source === "local" ? "local" : "clickup",
+                                                        source: list.source === "local" ? "local" : "seeded",
                                                         parentFolderId: folder.id,
                                                         clientId: list.clientId ?? null,
                                                         clientName: list.clientName ?? null,
@@ -726,7 +727,7 @@ export function Sidebar({
                                                         setEditBoardTarget({
                                                             id: list.id,
                                                             name: list.name,
-                                                            source: list.source === "local" ? "local" : "clickup",
+                                                            source: list.source === "local" ? "local" : "seeded",
                                                             parentFolderId: folder.id,
                                                             clientId: list.clientId ?? null,
                                                             clientName: list.clientName ?? null,
@@ -739,7 +740,7 @@ export function Sidebar({
                                                         setEditBoardTarget({
                                                             id: list.id,
                                                             name: list.name,
-                                                            source: list.source === "local" ? "local" : "clickup",
+                                                            source: list.source === "local" ? "local" : "seeded",
                                                             parentFolderId: folder.id,
                                                             clientId: list.clientId ?? null,
                                                             clientName: list.clientName ?? null,
