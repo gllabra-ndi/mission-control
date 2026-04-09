@@ -11,6 +11,7 @@ const headers = {
 export interface ClickUpTask {
     id: string;
     name: string;
+    description?: string;
     status: { status: string; color: string; type: string };
     date_created: string;
     date_updated: string;

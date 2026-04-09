@@ -4,12 +4,12 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Building2, Mail, Plus, Save, Trash2, Users, X } from "lucide-react";
 import {
-    STANDARD_CLIENT_ROLES,
     deleteClientDirectoryEntry,
     saveClientDirectoryEntry,
     type ClientDirectoryContact,
     type ClientDirectoryRecord,
 } from "@/app/actions";
+import { STANDARD_CLIENT_ROLES } from "@/lib/clientRoles";
 import { cn } from "@/lib/utils";
 
 interface ClientSetupProps {

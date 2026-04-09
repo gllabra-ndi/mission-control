@@ -5,7 +5,7 @@ import { ClickUpTask, TimeEntry } from "@/lib/clickup";
 import { Download, ArrowRight, CheckCircle2, Circle, ChevronLeft, ChevronRight } from "lucide-react";
 import { startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, subWeeks, addWeeks, format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { generateClientDashboardNarratives, type ClientDashboardNarrativeInput } from "@/app/actions";
+import { generateClientDashboardNarratives, type ClientDashboardNarrativeInput, type ClientDashboardTaskNarrative } from "@/app/actions";
 
 interface ClientDashboardProps {
     clientId: string;
@@ -22,6 +22,7 @@ interface ClientDashboardProps {
 type ClientDashboardNarrativeResult = {
     detailedWorkPerformed: string;
     valueDelivered: string;
+    taskNarratives?: ClientDashboardTaskNarrative[];
     source: "llm" | "fallback";
     generatedAt: string;
 };
@@ -43,6 +44,15 @@ export function ClientDashboard({
     const [isNarrativeLoading, setIsNarrativeLoading] = useState(false);
     const [narratives, setNarratives] = useState<ClientDashboardNarrativeResult | null>(null);
     const narrativeRequestId = useRef(0);
+    const taskNarrativeLookup = useMemo(() => {
+        const map = new Map<string, ClientDashboardTaskNarrative>();
+        (narratives?.taskNarratives || []).forEach((entry) => {
+            if (entry?.taskId) {
+                map.set(entry.taskId, entry);
+            }
+        });
+        return map;
+    }, [narratives?.taskNarratives]);
 
     const handleDownloadPdf = async () => {
         if (!dashboardRef.current) return;
@@ -166,7 +176,7 @@ export function ClientDashboard({
         tasks: tasksInRange.map((task) => ({
             id: String(task.id),
             name: String(task.name || "").trim(),
-            description: "",
+            description: String((task as any).description || "").trim(),
             listName: String(task.list?.name || ""),
             assignees: Array.isArray(task.assignees)
                 ? task.assignees.map((assignee) => String(assignee.username || "")).filter(Boolean).join(", ")
@@ -223,6 +233,8 @@ export function ClientDashboard({
     const narrativeGeneratedAt = narratives?.generatedAt
         ? new Date(narratives.generatedAt).toLocaleString()
         : "Not generated yet";
+
+    const getTaskNarrative = (taskId: string) => taskNarrativeLookup.get(taskId);
 
     return (
         <div className="flex flex-col h-full bg-background relative overflow-hidden">
@@ -361,6 +373,16 @@ export function ClientDashboard({
                                 {categorizedTasks.backlog.map((task) => (
                                     <div key={task.id} className="bg-surface p-3 rounded-lg border border-border/50 text-sm hover:border-orange-400/30 transition-colors">
                                         <div className="font-medium text-text-main mb-1 truncate">{task.name}</div>
+                                        {(() => {
+                                            const narrative = getTaskNarrative(task.id);
+                                            if (!narrative) return null;
+                                            return (
+                                                <div className="space-y-1 mb-2">
+                                                    <p className="text-xs text-text-muted whitespace-pre-wrap">{narrative.workSummary}</p>
+                                                    <p className="text-xs text-emerald-200 whitespace-pre-wrap">{narrative.valueContribution}</p>
+                                                </div>
+                                            );
+                                        })()}
                                         <div className="text-xs text-text-muted flex justify-between">
                                             <span>{Array.isArray(task.assignees) && task.assignees[0] ? task.assignees[0].username : "Unassigned"}</span>
                                             <span style={{ color: task.status.color }}>{task.status.status}</span>
@@ -382,6 +404,16 @@ export function ClientDashboard({
                                 {categorizedTasks.inProgress.map((task) => (
                                     <div key={task.id} className="bg-surface p-3 rounded-lg border border-border/50 text-sm hover:border-blue-400/30 transition-colors">
                                         <div className="font-medium text-text-main mb-1 truncate">{task.name}</div>
+                                        {(() => {
+                                            const narrative = getTaskNarrative(task.id);
+                                            if (!narrative) return null;
+                                            return (
+                                                <div className="space-y-1 mb-2">
+                                                    <p className="text-xs text-text-muted whitespace-pre-wrap">{narrative.workSummary}</p>
+                                                    <p className="text-xs text-emerald-200 whitespace-pre-wrap">{narrative.valueContribution}</p>
+                                                </div>
+                                            );
+                                        })()}
                                         <div className="text-xs text-text-muted flex justify-between">
                                             <span>{Array.isArray(task.assignees) && task.assignees[0] ? task.assignees[0].username : "Unassigned"}</span>
                                             <span style={{ color: task.status.color }}>{task.status.status}</span>
@@ -403,6 +435,16 @@ export function ClientDashboard({
                                 {categorizedTasks.completed.map((task) => (
                                     <div key={task.id} className="bg-surface p-3 rounded-lg border border-border/50 text-sm hover:border-green-400/30 transition-colors">
                                         <div className="font-medium text-text-main mb-1 truncate">{task.name}</div>
+                                        {(() => {
+                                            const narrative = getTaskNarrative(task.id);
+                                            if (!narrative) return null;
+                                            return (
+                                                <div className="space-y-1 mb-2">
+                                                    <p className="text-xs text-text-muted whitespace-pre-wrap">{narrative.workSummary}</p>
+                                                    <p className="text-xs text-emerald-200 whitespace-pre-wrap">{narrative.valueContribution}</p>
+                                                </div>
+                                            );
+                                        })()}
                                         <div className="text-xs text-text-muted flex justify-between">
                                             <span>{Array.isArray(task.assignees) && task.assignees[0] ? task.assignees[0].username : "Unassigned"}</span>
                                             <span style={{ color: task.status.color }}>{task.status.status}</span>

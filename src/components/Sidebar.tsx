@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition, Suspense, use } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 
@@ -21,6 +21,7 @@ import {
     Plus,
     Trash2,
     X,
+    PieChart
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -47,26 +48,19 @@ interface SidebarClientOption {
 }
 
 interface SidebarProps {
-    foldersPromise?: Promise<FolderWithLists[]>;
-    initialTasksPromise?: Promise<any[]>;
-    initialSidebarStructure?: any;
-    initialFolders?: FolderWithLists[];
+    folders?: FolderWithLists[];
     clientOptions?: SidebarClientOption[];
     selectedListId?: string | null;
     selectedFolderId?: string | null;
+    selectedClientId?: string | null;
     activeTab?: string;
     weekStr?: string;
     assigneeFilter?: string | null;
     onSelectList?: (id: string | null) => void;
     onSelectFolder?: (id: string | null) => void;
+    onSelectClient?: (clientId: string) => void;
     onSelectTab?: (tab: string) => void;
     teamsLabel?: string;
-}
-
-const PROFESSIONAL_SERVICES_SPACE_ID = "90120150242";
-
-function normalizeConsultantNameKey(value: string) {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 const navItems = [
@@ -81,355 +75,26 @@ const navItems = [
 
 const projectItems = [
     { icon: BarChart3, label: "Backlog Growth", id: "backlog-growth" },
+    { icon: PieChart, label: "Client Dashboard", id: "client-dashboard" },
 ];
 
-function FoldersContent({
-    foldersPromise,
-    sidebarStructure,
-    clientOptions,
-    visibleFolders,
-    selectedFolderId,
-    selectedListId,
-    expandedFolders,
-    draggingBoard,
-    dropPreview,
-    isMounted,
-    onSelectTab,
-    onSelectFolder,
-    onSelectList,
-    toggleFolder,
-    setDropPreview,
-    handleBoardDrop,
-    setCreateBoardTarget,
-    setEditFolderTarget,
-    setDraggingBoard,
-    setEditBoardTarget,
-}: any) {
-    const initialFoldersRaw = foldersPromise ? use(foldersPromise) : (visibleFolders || []);
-
-    const availableFolders = useMemo(() => {
-        const initialFolders = foldersPromise ? initialFoldersRaw : (visibleFolders || []);
-        if (!initialFolders.length) return [];
-        
-        const shouldExcludeList = (name: string) => /user\s*guide/i.test(name);
-        const hiddenFolderIds = new Set((sidebarStructure?.hiddenFolderIds ?? []).map((id: any) => String(id)));
-        const hiddenBoardIds = new Set((sidebarStructure?.hiddenBoardIds ?? []).map((id: any) => String(id)));
-        const folderOverrideMap = new Map(
-            (sidebarStructure?.folderOverrides ?? []).map((override: any) => [
-                `${override.source}:${override.folderId}`,
-                override,
-            ])
-        );
-        const placementMap = new Map(
-            (sidebarStructure?.placements ?? []).map((placement: any) => [
-                `${placement.source}:${placement.boardId}`,
-                placement,
-            ])
-        );
-        
-        const normalizedClientCandidates = (clientOptions || []).map((client: any) => ({
-            ...client,
-            normalizedId: normalizeConsultantNameKey(client.id),
-            normalizedName: normalizeConsultantNameKey(client.name),
-        }));
-
-        const inferClientFromBoardName = (boardName: string) => {
-            const normalizedBoardName = normalizeConsultantNameKey(boardName);
-            if (!normalizedBoardName) return null;
-            let bestMatch: { id: string; name: string; score: number } | null = null;
-            for (const client of normalizedClientCandidates) {
-                const idScore = client.normalizedId && normalizedBoardName.includes(client.normalizedId) ? client.normalizedId.length + 100 : 0;
-                const nameScore = client.normalizedName && normalizedBoardName.includes(client.normalizedName) ? client.normalizedName.length : 0;
-                const score = Math.max(idScore, nameScore);
-                if (score <= 0) continue;
-                if (!bestMatch || score > bestMatch.score) {
-                    bestMatch = { id: client.id, name: client.name, score };
-                }
-            }
-            return bestMatch ? { id: bestMatch.id, name: bestMatch.name } : null;
-        };
-
-        const folderCatalog = new Map<string, { id: string; name: string; source: "clickup" | "local" }>();
-        initialFolders.forEach((folder: any) => {
-            if (hiddenFolderIds.has(String(folder.id))) return;
-            const override = folderOverrideMap.get(`clickup:${String(folder.id)}`) as any;
-            folderCatalog.set(String(folder.id), {
-                id: String(folder.id),
-                name: String(override?.name ?? folder.name),
-                source: "clickup",
-            });
-        });
-
-        const boardBuckets = new Map<string, any[]>();
-        const pushBoard = (board: any) => {
-            const placement = placementMap.get(`${board.source}:${board.id}`) as any;
-            const resolvedBoardName = String(placement?.boardName ?? board.name);
-            const linkedClient = placement?.clientId && placement?.clientName
-                ? { id: String(placement.clientId), name: String(placement.clientName) }
-                : inferClientFromBoardName(resolvedBoardName);
-            const targetFolderId = String(placement?.parentFolderId ?? board.defaultFolderId);
-            if (!targetFolderId) return;
-            const bucket = boardBuckets.get(targetFolderId) ?? [];
-            bucket.push({
-                ...board,
-                name: resolvedBoardName,
-                clientId: linkedClient?.id ?? null,
-                clientName: linkedClient?.name ?? null,
-                sortOrder: Number(placement?.orderIndex ?? board.defaultOrder),
-            });
-            boardBuckets.set(targetFolderId, bucket);
-        };
-
-        initialFolders.forEach((folder: any) => {
-            if (hiddenFolderIds.has(String(folder.id))) return;
-            (folder.lists || [])
-                .filter((list: any) => !shouldExcludeList(list.name) && !hiddenBoardIds.has(String(list.id)))
-                .forEach((list: any, index: number) => {
-                    pushBoard({
-                        id: String(list.id),
-                        name: String(list.name),
-                        source: "clickup",
-                        defaultFolderId: String(folder.id),
-                        defaultOrder: index,
-                        statusOrder: list.statusOrder,
-                    });
-                });
-        });
-
-        const buildFolder = (folderId: string): FolderWithLists | null => {
-            const folder = folderCatalog.get(folderId);
-            if (!folder) return null;
-            const lists = (boardBuckets.get(folderId) ?? [])
-                .sort((a, b) => (a.sortOrder - b.sortOrder) || a.name.localeCompare(b.name));
-            if (lists.length === 0) return null;
-            return { id: folder.id, name: folder.name, source: folder.source, lists };
-        };
-
-        return initialFolders.map((f: any) => buildFolder(String(f.id))).filter(Boolean) as FolderWithLists[];
-    }, [clientOptions, initialFoldersRaw, sidebarStructure, foldersPromise, visibleFolders]);
-
-    if (availableFolders.length === 0) return null;
-
-    return (
-        <>
-            {availableFolders.map((folder: any) => {
-                const isExpanded = expandedFolders[folder.id] === true;
-
-                return (
-                    <div key={folder.id} className="space-y-1">
-                        <div
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => {
-                                onSelectTab("issues");
-                                onSelectFolder(folder.id);
-                            }}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter" || event.key === " ") {
-                                    event.preventDefault();
-                                    onSelectTab("issues");
-                                    onSelectFolder(folder.id);
-                                }
-                            }}
-                            className={cn(
-                                "w-full px-3 py-1.5 flex items-center gap-2 rounded-md border transition-colors text-left group focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
-                                selectedFolderId === folder.id
-                                    ? "border-primary/35 bg-primary/10 text-text-main shadow-sm"
-                                    : "border-transparent text-text-muted/80 hover:bg-surface-hover/30 hover:text-text-main",
-                                dropPreview?.folderId === folder.id && !dropPreview?.boardId && "border-primary/45 bg-primary/10"
-                            )}
-                            onDragOver={(event) => {
-                                if (!draggingBoard) return;
-                                event.preventDefault();
-                                setDropPreview({ folderId: folder.id, boardId: null, position: "inside" });
-                            }}
-                            onDrop={(event) => {
-                                if (!draggingBoard) return;
-                                event.preventDefault();
-                                handleBoardDrop(folder.id);
-                            }}
-                        >
-                            <div
-                                className="p-0.5 -ml-1 rounded hover:bg-surface-hover/80 transition-colors"
-                                onClick={(e) => {
-                                    e.preventDefault();
-                                    toggleFolder(folder.id, e);
-                                }}
-                            >
-                                {isMounted ? (
-                                    isExpanded ? (
-                                        <ChevronDown className="w-3.5 h-3.5 text-text-muted group-hover:text-text-main" />
-                                    ) : (
-                                        <ChevronRight className="w-3.5 h-3.5 text-text-muted group-hover:text-text-main" />
-                                    )
-                                ) : (
-                                    <span className="w-3.5 h-3.5 block" aria-hidden />
-                                )}
-                            </div>
-                            {isMounted ? (
-                                <Folder className={cn(
-                                    "w-3.5 h-3.5",
-                                    selectedFolderId === folder.id ? "text-primary flex-shrink-0" : "text-text-muted/80 group-hover:text-text-main flex-shrink-0"
-                                )} />
-                            ) : (
-                                <span className="w-3.5 h-3.5 shrink-0" aria-hidden />
-                            )}
-                            <span className="text-[11px] font-bold uppercase tracking-wider truncate flex-1">{folder.name}</span>
-                            <div className="flex items-center gap-1">
-                                <button
-                                    type="button"
-                                    onClick={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        setCreateBoardTarget({ folderId: folder.id, folderName: folder.name });
-                                    }}
-                                    className="inline-flex items-center justify-center rounded border border-transparent p-1 text-text-muted hover:border-border/60 hover:bg-surface-hover hover:text-white"
-                                    aria-label={`Add board to ${folder.name}`}
-                                >
-                                    <Plus className="w-3 h-3" />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        setEditFolderTarget({
-                                            id: folder.id,
-                                            name: folder.name,
-                                            source: folder.source === "local" ? "local" : "clickup",
-                                        });
-                                    }}
-                                    className="inline-flex items-center justify-center rounded border border-transparent p-1 text-text-muted hover:border-border/60 hover:bg-surface-hover hover:text-white"
-                                    aria-label={`Rename ${folder.name}`}
-                                >
-                                    <Pencil className="w-3 h-3" />
-                                </button>
-                            </div>
-                        </div>
-
-                        {isExpanded && folder.lists.map((list: any) => {
-                            const isActive = selectedListId === list.id;
-                            const isDropTarget = dropPreview?.folderId === folder.id && dropPreview?.boardId === list.id;
-                            return (
-                                <button
-                                    key={list.id}
-                                    type="button"
-                                    draggable
-                                    onClick={() => {
-                                        onSelectTab("issues");
-                                        onSelectList(list.id);
-                                    }}
-                                    onDragStart={(event) => {
-                                        event.dataTransfer.effectAllowed = "move";
-                                        event.dataTransfer.setData("text/plain", list.id);
-                                        setDraggingBoard({
-                                            id: list.id,
-                                            name: list.name,
-                                            source: list.source === "local" ? "local" : "clickup",
-                                            parentFolderId: folder.id,
-                                            clientId: list.clientId ?? null,
-                                            clientName: list.clientName ?? null,
-                                        });
-                                    }}
-                                    onDragEnd={() => {
-                                        setDraggingBoard(null);
-                                        setDropPreview(null);
-                                    }}
-                                    onDragOver={(event) => {
-                                        if (!draggingBoard) return;
-                                        event.preventDefault();
-                                        const rect = event.currentTarget.getBoundingClientRect();
-                                        const position = event.clientY - rect.top > rect.height / 2 ? "after" : "before";
-                                        setDropPreview({ folderId: folder.id, boardId: list.id, position });
-                                    }}
-                                    onDrop={(event) => {
-                                        if (!draggingBoard) return;
-                                        event.preventDefault();
-                                        const rect = event.currentTarget.getBoundingClientRect();
-                                        const position = event.clientY - rect.top > rect.height / 2 ? "after" : "before";
-                                        handleBoardDrop(folder.id, list.id, position);
-                                    }}
-                                    className={cn(
-                                        "w-full flex items-center gap-3 px-3 py-1.5 pl-8 rounded-md border transition-all duration-200 text-[13px] font-medium group text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
-                                        isActive
-                                            ? "border-primary/45 bg-primary/12 text-text-main shadow-sm relative"
-                                            : "border-transparent text-text-muted hover:text-text-main hover:bg-surface-hover/20",
-                                        isDropTarget && "border-primary/45 bg-primary/10",
-                                        draggingBoard?.id === list.id && "opacity-60 cursor-grabbing",
-                                        !draggingBoard?.id || draggingBoard.id !== list.id ? "cursor-grab" : ""
-                                    )}
-                                    title={list.name}
-                                >
-                                    {isActive && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-primary rounded-r-full" />}
-                                    <GripVertical className="h-3.5 w-3.5 shrink-0 text-text-muted/70" />
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate">{list.name}</div>
-                                        {list.clientName && (
-                                            <div className="truncate text-[10px] uppercase tracking-wider text-text-muted/70">
-                                                {list.clientName}
-                                            </div>
-                                        )}
-                                    </div>
-                                    <span
-                                        role="button"
-                                        tabIndex={0}
-                                        onClick={(event) => {
-                                            event.preventDefault();
-                                            event.stopPropagation();
-                                            setEditBoardTarget({
-                                                id: list.id,
-                                                name: list.name,
-                                                source: list.source === "local" ? "local" : "clickup",
-                                                parentFolderId: folder.id,
-                                                clientId: list.clientId ?? null,
-                                                clientName: list.clientName ?? null,
-                                            });
-                                        }}
-                                        onKeyDown={(event) => {
-                                            if (event.key !== "Enter" && event.key !== " ") return;
-                                            event.preventDefault();
-                                            event.stopPropagation();
-                                            setEditBoardTarget({
-                                                id: list.id,
-                                                name: list.name,
-                                                source: list.source === "local" ? "local" : "clickup",
-                                                parentFolderId: folder.id,
-                                                clientId: list.clientId ?? null,
-                                                clientName: list.clientName ?? null,
-                                            });
-                                        }}
-                                        className="inline-flex shrink-0 items-center justify-center rounded border border-transparent p-1 text-text-muted opacity-0 transition-opacity hover:border-border/60 hover:bg-surface-hover hover:text-white group-hover:opacity-100"
-                                    >
-                                        <Pencil className="h-3 w-3" />
-                                    </span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                );
-            })}
-        </>
-    );
-}
-
 export function Sidebar({
-    foldersPromise,
-    initialTasksPromise,
-    initialSidebarStructure,
-    initialFolders: foldersIn = [],
+    folders = [],
     clientOptions = [],
     selectedListId = null,
     selectedFolderId = null,
+    selectedClientId = null,
     activeTab = "issues",
     weekStr = "",
     assigneeFilter = null,
     onSelectList = () => { },
     onSelectFolder = () => { },
+    onSelectClient = () => { },
     onSelectTab = () => { },
     teamsLabel = "Teams",
 }: SidebarProps) {
     const expandedFoldersStorageKey = "mission-control:expanded-folders";
-    const [visibleFolders, setVisibleFolders] = useState<FolderWithLists[]>(foldersIn);
+    const [visibleFolders, setVisibleFolders] = useState<FolderWithLists[]>(folders);
     const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
     const [isMounted, setIsMounted] = useState(false);
     const [isMutating, startTransition] = useTransition();
@@ -462,10 +127,8 @@ export function Sidebar({
     }, []);
 
     useEffect(() => {
-        if (foldersIn.length > 0) {
-            setVisibleFolders(foldersIn);
-        }
-    }, [foldersIn]);
+        setVisibleFolders(folders);
+    }, [folders]);
 
     useEffect(() => {
         if (!isMounted || typeof window === "undefined") return;
@@ -482,6 +145,40 @@ export function Sidebar({
         });
         return map;
     }, [clientOptions]);
+
+    const selectedNewBoardClient = newBoardClientId ? clientById.get(newBoardClientId) ?? null : null;
+    const selectedEditBoardClient = editBoardClientId ? clientById.get(editBoardClientId) ?? null : null;
+
+    const boardExistsInTarget = useMemo(() => {
+        if (!createBoardTarget || !newBoardName.trim()) return false;
+        const targetFolder = visibleFolders.find((folder) => folder.id === createBoardTarget.folderId);
+        if (!targetFolder) return false;
+        const normalizedNewBoard = newBoardName.trim().toLowerCase();
+        return targetFolder.lists.some((list) => String(list.name ?? "").trim().toLowerCase() === normalizedNewBoard);
+    }, [createBoardTarget, visibleFolders, newBoardName]);
+
+    useEffect(() => {
+        if (!createBoardTarget) return;
+        if (newBoardName.trim()) return;
+        const targetFolder = visibleFolders.find((folder) => folder.id === createBoardTarget.folderId);
+        const existingNames = new Set(
+            (targetFolder?.lists ?? [])
+                .map((list) => String(list.name ?? "").trim().toLowerCase())
+                .filter(Boolean)
+        );
+        const defaultClient = selectedNewBoardClient ?? clientOptions[0] ?? null;
+        if (!defaultClient) return;
+        if (!newBoardClientId) {
+            setNewBoardClientId(defaultClient.id);
+        }
+        let nextAvailable = defaultClient.name;
+        let suffix = 2;
+        while (existingNames.has(nextAvailable.toLowerCase())) {
+            nextAvailable = `${defaultClient.name} ${suffix}`;
+            suffix += 1;
+        }
+        setNewBoardName(nextAvailable);
+    }, [clientOptions, createBoardTarget, newBoardClientId, newBoardName, selectedNewBoardClient, visibleFolders]);
 
     const toggleFolder = (folderId: string, e?: React.MouseEvent) => {
         if (e) e.stopPropagation();
@@ -522,8 +219,8 @@ export function Sidebar({
     const handleCreateBoard = () => {
         if (!createBoardTarget) return;
         const trimmed = newBoardName.trim();
-        const selectedClient = newBoardClientId ? clientById.get(newBoardClientId) ?? null : null;
-        if (!trimmed || !selectedClient) return;
+        const selectedClient = selectedNewBoardClient;
+        if (!trimmed || boardExistsInTarget || !selectedClient) return;
         startTransition(async () => {
             const created = await createTaskSidebarBoard({
                 parentFolderId: createBoardTarget.folderId,
@@ -541,17 +238,227 @@ export function Sidebar({
         });
     };
 
+    const closeCreateBoardModal = () => {
+        setCreateBoardTarget(null);
+        setNewBoardName("");
+        setNewBoardClientId("");
+    };
+
+    const handleDeleteTarget = () => {
+        if (!deleteTarget) return;
+        startTransition(async () => {
+            if (deleteTarget.type === "folder") {
+                await removeTaskSidebarFolder(deleteTarget.id);
+                const deletingActiveFolder = selectedFolderId === deleteTarget.id;
+                setDeleteTarget(null);
+                router.refresh();
+                if (deletingActiveFolder) {
+                    window.location.href = buildHref("issues");
+                }
+                return;
+            }
+
+            await removeTaskSidebarBoard(deleteTarget.id);
+            const deletingActiveBoard = selectedListId === deleteTarget.id;
+            const parentFolderId = deleteTarget.parentFolderId ?? null;
+            setDeleteTarget(null);
+            router.refresh();
+            if (deletingActiveBoard) {
+                window.location.href = parentFolderId ? buildHref("issues", null, parentFolderId) : buildHref("issues");
+            }
+        });
+    };
+
+    useEffect(() => {
+        if (!editFolderTarget) return;
+        setEditFolderName(editFolderTarget.name);
+    }, [editFolderTarget]);
+
+    useEffect(() => {
+        if (!editBoardTarget) return;
+        setEditBoardName(editBoardTarget.name);
+        setEditBoardClientId(String(editBoardTarget.clientId ?? ""));
+    }, [editBoardTarget]);
+
+    const applyBoardUpdateLocally = (input: {
+        boardId: string;
+        parentFolderId: string;
+        name: string;
+        clientId: string;
+        clientName: string;
+    }) => {
+        setVisibleFolders((prev) => prev.map((folder) => {
+            if (folder.id !== input.parentFolderId) return folder;
+            return {
+                ...folder,
+                lists: folder.lists.map((list) => (
+                    list.id !== input.boardId
+                        ? list
+                        : {
+                            ...list,
+                            name: input.name,
+                            clientId: input.clientId,
+                            clientName: input.clientName,
+                        }
+                )),
+            };
+        }));
+    };
+
+    const handleEditFolder = () => {
+        if (!editFolderTarget) return;
+        const trimmed = editFolderName.trim();
+        if (!trimmed) return;
+        startTransition(async () => {
+            await updateTaskSidebarFolder({
+                folderId: editFolderTarget.id,
+                source: editFolderTarget.source,
+                name: trimmed,
+            });
+            setVisibleFolders((prev) => prev.map((folder) => (
+                folder.id === editFolderTarget.id ? { ...folder, name: trimmed } : folder
+            )));
+            setEditFolderTarget(null);
+            setEditFolderName("");
+            router.refresh();
+        });
+    };
+
+    const handleEditBoard = () => {
+        if (!editBoardTarget) return;
+        const trimmed = editBoardName.trim();
+        const selectedClient = selectedEditBoardClient;
+        if (!trimmed || !selectedClient) return;
+        startTransition(async () => {
+            await updateTaskSidebarBoard({
+                boardId: editBoardTarget.id,
+                source: editBoardTarget.source,
+                parentFolderId: editBoardTarget.parentFolderId,
+                name: trimmed,
+                clientId: selectedClient.id,
+                clientName: selectedClient.name,
+            });
+            applyBoardUpdateLocally({
+                boardId: editBoardTarget.id,
+                parentFolderId: editBoardTarget.parentFolderId,
+                name: trimmed,
+                clientId: selectedClient.id,
+                clientName: selectedClient.name,
+            });
+            setEditBoardTarget(null);
+            setEditBoardName("");
+            setEditBoardClientId("");
+            router.refresh();
+        });
+    };
+
+    const modalRoot = isMounted && typeof document !== "undefined" ? document.body : null;
+
+    const getFolderBoards = (folderId: string) => {
+        const folder = visibleFolders.find((item) => item.id === folderId);
+        return (folder?.lists ?? [])
+            .map((list) => ({
+                boardId: String(list.id),
+                boardName: String(list.name ?? ""),
+                clientId: list.clientId == null ? null : String(list.clientId),
+                clientName: list.clientName == null ? null : String(list.clientName),
+                source: list.source === "local" ? "local" as const : "clickup" as const,
+            }));
+    };
+
+    const buildFolderLayouts = (nextFolders: FolderWithLists[]) =>
+        nextFolders.map((folder) => ({
+            folderId: String(folder.id),
+            boards: folder.lists.map((list) => ({
+                boardId: String(list.id),
+                boardName: String(list.name ?? ""),
+                clientId: list.clientId == null ? null : String(list.clientId),
+                clientName: list.clientName == null ? null : String(list.clientName),
+                source: list.source === "local" ? "local" as const : "clickup" as const,
+            })),
+        }));
+
     const handleBoardDrop = (
         targetFolderId: string,
         targetBoardId: string | null = null,
         position: "inside" | "before" | "after" = "inside"
     ) => {
         if (!draggingBoard) return;
-        // Simplified drop logic for the shell
-        console.log("Dropped board", draggingBoard.id, "into folder", targetFolderId);
-    };
 
-    const modalRoot = isMounted && typeof document !== "undefined" ? document.body : null;
+        const sourceBoards = getFolderBoards(draggingBoard.parentFolderId)
+            .filter((board) => board.boardId !== draggingBoard.id);
+        const targetBoardsBase = draggingBoard.parentFolderId === targetFolderId
+            ? sourceBoards
+            : getFolderBoards(targetFolderId).filter((board) => board.boardId !== draggingBoard.id);
+        let targetIndex = targetBoardsBase.length;
+
+        if (targetBoardId) {
+            const boardIndex = targetBoardsBase.findIndex((board) => board.boardId === targetBoardId);
+            if (boardIndex >= 0) {
+                targetIndex = position === "after" ? boardIndex + 1 : boardIndex;
+            }
+        }
+
+        const reorderedTargetBoards = [...targetBoardsBase];
+        reorderedTargetBoards.splice(targetIndex, 0, {
+            boardId: draggingBoard.id,
+            boardName: draggingBoard.name,
+            clientId: draggingBoard.clientId == null ? null : String(draggingBoard.clientId),
+            clientName: draggingBoard.clientName == null ? null : String(draggingBoard.clientName),
+            source: draggingBoard.source,
+        });
+
+        const nextVisibleFolders = visibleFolders.map((folder) => {
+            if (folder.id === draggingBoard.parentFolderId && folder.id === targetFolderId) {
+                return {
+                    ...folder,
+                    lists: reorderedTargetBoards.map((board) => ({
+                        id: board.boardId,
+                        name: board.boardName,
+                        clientId: board.clientId,
+                        clientName: board.clientName,
+                        source: board.source,
+                    })),
+                };
+            }
+            if (folder.id === draggingBoard.parentFolderId) {
+                return {
+                    ...folder,
+                    lists: sourceBoards.map((board) => ({
+                        id: board.boardId,
+                        name: board.boardName,
+                        clientId: board.clientId,
+                        clientName: board.clientName,
+                        source: board.source,
+                    })),
+                };
+            }
+            if (folder.id === targetFolderId) {
+                return {
+                    ...folder,
+                    lists: reorderedTargetBoards.map((board) => ({
+                        id: board.boardId,
+                        name: board.boardName,
+                        clientId: board.clientId,
+                        clientName: board.clientName,
+                        source: board.source,
+                    })),
+                };
+            }
+            return folder;
+        });
+
+        setVisibleFolders(nextVisibleFolders);
+
+        startTransition(async () => {
+            await saveTaskSidebarBoardLayout({
+                folders: buildFolderLayouts(nextVisibleFolders),
+            });
+            setDraggingBoard(null);
+            setDropPreview(null);
+            router.refresh();
+        });
+    };
 
     return (
         <aside className="w-64 border-r border-border bg-background flex flex-col h-full shrink-0 relative z-10">
@@ -639,53 +546,217 @@ export function Sidebar({
                 </div>
 
                 {/* Folders List */}
-                <div className="space-y-4 pb-4">
-                    <div className="px-3 flex items-center justify-between">
-                        <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">{teamsLabel}</span>
-                        <button
-                            type="button"
-                            onClick={() => setCreateFolderOpen(true)}
-                            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-[11px] font-medium text-text-main hover:bg-surface-hover"
-                        >
-                            <Plus className="w-3 h-3" />
-                            New Folder
-                        </button>
-                    </div>
-
-                    <Suspense fallback={
-                        <div className="px-3 py-4 flex flex-col gap-3">
-                            {[1, 2, 3].map(i => (
-                                <div key={i} className="flex items-center gap-2 animate-pulse">
-                                    <div className="h-3 w-3 bg-slate-800 rounded-full" />
-                                    <div className="h-3 w-24 bg-slate-800 rounded" />
-                                </div>
-                            ))}
+                {visibleFolders.length > 0 && (
+                    <div className="space-y-4 pb-4">
+                        <div className="px-3 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">{teamsLabel}</span>
+                            <button
+                                type="button"
+                                onClick={() => setCreateFolderOpen(true)}
+                                className="inline-flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-[11px] font-medium text-text-main hover:bg-surface-hover"
+                            >
+                                <Plus className="w-3 h-3" />
+                                New Folder
+                            </button>
                         </div>
-                    }>
-                        <FoldersContent
-                            foldersPromise={foldersPromise}
-                            sidebarStructure={initialSidebarStructure}
-                            clientOptions={clientOptions}
-                            visibleFolders={visibleFolders}
-                            selectedFolderId={selectedFolderId}
-                            selectedListId={selectedListId}
-                            expandedFolders={expandedFolders}
-                            draggingBoard={draggingBoard}
-                            dropPreview={dropPreview}
-                            isMounted={isMounted}
-                            onSelectTab={onSelectTab}
-                            onSelectFolder={onSelectFolder}
-                            onSelectList={onSelectList}
-                            toggleFolder={toggleFolder}
-                            setDropPreview={setDropPreview}
-                            handleBoardDrop={handleBoardDrop}
-                            setCreateBoardTarget={setCreateBoardTarget}
-                            setEditFolderTarget={setEditFolderTarget}
-                            setDraggingBoard={setDraggingBoard}
-                            setEditBoardTarget={setEditBoardTarget}
-                        />
-                    </Suspense>
-                </div>
+                        {visibleFolders.map((folder) => {
+                            const isExpanded = expandedFolders[folder.id] === true;
+
+                            return (
+                                <div key={folder.id} className="space-y-1">
+                                    <div
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={() => {
+                                            onSelectTab("issues");
+                                            onSelectFolder(folder.id);
+                                        }}
+                                        onKeyDown={(event) => {
+                                            if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                onSelectTab("issues");
+                                                onSelectFolder(folder.id);
+                                            }
+                                        }}
+                                        className={cn(
+                                            "w-full px-3 py-1.5 flex items-center gap-2 rounded-md border transition-colors text-left group focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                                            selectedFolderId === folder.id
+                                                ? "border-primary/35 bg-primary/10 text-text-main shadow-sm"
+                                                : "border-transparent text-text-muted/80 hover:bg-surface-hover/30 hover:text-text-main",
+                                            dropPreview?.folderId === folder.id && !dropPreview?.boardId && "border-primary/45 bg-primary/10"
+                                        )}
+                                        onDragOver={(event) => {
+                                            if (!draggingBoard) return;
+                                            event.preventDefault();
+                                            setDropPreview({ folderId: folder.id, boardId: null, position: "inside" });
+                                        }}
+                                        onDrop={(event) => {
+                                            if (!draggingBoard) return;
+                                            event.preventDefault();
+                                            handleBoardDrop(folder.id);
+                                        }}
+                                    >
+                                        <div
+                                            className="p-0.5 -ml-1 rounded hover:bg-surface-hover/80 transition-colors"
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                toggleFolder(folder.id, e);
+                                            }}
+                                        >
+                                            {isMounted ? (
+                                                isExpanded ? (
+                                                    <ChevronDown className="w-3.5 h-3.5 text-text-muted group-hover:text-text-main" />
+                                                ) : (
+                                                    <ChevronRight className="w-3.5 h-3.5 text-text-muted group-hover:text-text-main" />
+                                                )
+                                            ) : (
+                                                <span className="w-3.5 h-3.5 block" aria-hidden />
+                                            )}
+                                        </div>
+                                        {isMounted ? (
+                                            <Folder className={cn(
+                                                "w-3.5 h-3.5",
+                                                selectedFolderId === folder.id ? "text-primary flex-shrink-0" : "text-text-muted/80 group-hover:text-text-main flex-shrink-0"
+                                            )} />
+                                        ) : (
+                                            <span className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                                        )}
+                                        <span className="text-[11px] font-bold uppercase tracking-wider truncate flex-1">{folder.name}</span>
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    setCreateBoardTarget({ folderId: folder.id, folderName: folder.name });
+                                                }}
+                                                className="inline-flex items-center justify-center rounded border border-transparent p-1 text-text-muted hover:border-border/60 hover:bg-surface-hover hover:text-white"
+                                                aria-label={`Add board to ${folder.name}`}
+                                            >
+                                                <Plus className="w-3 h-3" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    setEditFolderTarget({
+                                                        id: folder.id,
+                                                        name: folder.name,
+                                                        source: folder.source === "local" ? "local" : "clickup",
+                                                    });
+                                                }}
+                                                className="inline-flex items-center justify-center rounded border border-transparent p-1 text-text-muted hover:border-border/60 hover:bg-surface-hover hover:text-white"
+                                                aria-label={`Rename ${folder.name}`}
+                                            >
+                                                <Pencil className="w-3 h-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {isExpanded && folder.lists.map((list) => {
+                                        const isActive = selectedListId === list.id;
+                                        const isDropTarget = dropPreview?.folderId === folder.id && dropPreview?.boardId === list.id;
+                                        return (
+                                            <button
+                                                key={list.id}
+                                                type="button"
+                                                draggable
+                                                onClick={() => {
+                                                    onSelectTab("issues");
+                                                    onSelectList(list.id);
+                                                }}
+                                                onDragStart={(event) => {
+                                                    event.dataTransfer.effectAllowed = "move";
+                                                    event.dataTransfer.setData("text/plain", list.id);
+                                                    setDraggingBoard({
+                                                        id: list.id,
+                                                        name: list.name,
+                                                        source: list.source === "local" ? "local" : "clickup",
+                                                        parentFolderId: folder.id,
+                                                        clientId: list.clientId ?? null,
+                                                        clientName: list.clientName ?? null,
+                                                    });
+                                                }}
+                                                onDragEnd={() => {
+                                                    setDraggingBoard(null);
+                                                    setDropPreview(null);
+                                                }}
+                                                onDragOver={(event) => {
+                                                    if (!draggingBoard) return;
+                                                    event.preventDefault();
+                                                    const rect = event.currentTarget.getBoundingClientRect();
+                                                    const position = event.clientY - rect.top > rect.height / 2 ? "after" : "before";
+                                                    setDropPreview({ folderId: folder.id, boardId: list.id, position });
+                                                }}
+                                                onDrop={(event) => {
+                                                    if (!draggingBoard) return;
+                                                    event.preventDefault();
+                                                    const rect = event.currentTarget.getBoundingClientRect();
+                                                    const position = event.clientY - rect.top > rect.height / 2 ? "after" : "before";
+                                                    handleBoardDrop(folder.id, list.id, position);
+                                                }}
+                                                className={cn(
+                                                    "w-full flex items-center gap-3 px-3 py-1.5 pl-8 rounded-md border transition-all duration-200 text-[13px] font-medium group text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                                                    isActive
+                                                        ? "border-primary/45 bg-primary/12 text-text-main shadow-sm relative"
+                                                        : "border-transparent text-text-muted hover:text-text-main hover:bg-surface-hover/20",
+                                                    isDropTarget && "border-primary/45 bg-primary/10",
+                                                    draggingBoard?.id === list.id && "opacity-60 cursor-grabbing",
+                                                    !draggingBoard?.id || draggingBoard.id !== list.id ? "cursor-grab" : ""
+                                                )}
+                                                title={list.name}
+                                            >
+                                                {isActive && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-primary rounded-r-full" />}
+                                                <GripVertical className="h-3.5 w-3.5 shrink-0 text-text-muted/70" />
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="truncate">{list.name}</div>
+                                                    {list.clientName && (
+                                                        <div className="truncate text-[10px] uppercase tracking-wider text-text-muted/70">
+                                                            {list.clientName}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <span
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    onClick={(event) => {
+                                                        event.preventDefault();
+                                                        event.stopPropagation();
+                                                        setEditBoardTarget({
+                                                            id: list.id,
+                                                            name: list.name,
+                                                            source: list.source === "local" ? "local" : "clickup",
+                                                            parentFolderId: folder.id,
+                                                            clientId: list.clientId ?? null,
+                                                            clientName: list.clientName ?? null,
+                                                        });
+                                                    }}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key !== "Enter" && event.key !== " ") return;
+                                                        event.preventDefault();
+                                                        event.stopPropagation();
+                                                        setEditBoardTarget({
+                                                            id: list.id,
+                                                            name: list.name,
+                                                            source: list.source === "local" ? "local" : "clickup",
+                                                            parentFolderId: folder.id,
+                                                            clientId: list.clientId ?? null,
+                                                            clientName: list.clientName ?? null,
+                                                        });
+                                                    }}
+                                                    className="inline-flex shrink-0 items-center justify-center rounded border border-transparent p-1 text-text-muted opacity-0 transition-opacity hover:border-border/60 hover:bg-surface-hover hover:text-white group-hover:opacity-100"
+                                                >
+                                                    <Pencil className="h-3 w-3" />
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </nav>
 
             <div className="p-3 border-t border-border">
@@ -701,6 +772,277 @@ export function Sidebar({
                     Settings
                 </a>
             </div>
+            {createFolderOpen && modalRoot && createPortal((
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="flex items-center justify-between border-b border-border/50 bg-surface/80 px-5 py-4">
+                            <div>
+                                <div className="text-sm font-semibold text-text-main">New Folder</div>
+                                <div className="text-xs text-text-muted">Create a new task folder in the client panel.</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setCreateFolderOpen(false)}
+                                className="inline-flex items-center justify-center rounded-md border border-border/60 p-2 text-text-muted hover:bg-surface-hover hover:text-white"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Team Name</span>
+                                <input
+                                    value={newFolderName}
+                                    onChange={(e) => setNewFolderName(e.target.value)}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                    placeholder="Enter team name"
+                                />
+                            </label>
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setCreateFolderOpen(false)}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleCreateFolder}
+                                disabled={isMutating}
+                                className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/15 px-3 py-2 text-sm text-white hover:bg-primary/25 disabled:opacity-60"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Create Folder
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ), modalRoot)}
+            {createBoardTarget && modalRoot && createPortal((
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="flex items-center justify-between border-b border-border/50 bg-surface/80 px-5 py-4">
+                            <div>
+                                <div className="text-sm font-semibold text-text-main">New Board</div>
+                                <div className="text-xs text-text-muted">Create a board under {createBoardTarget.folderName} and link it to a client.</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeCreateBoardModal}
+                                className="inline-flex items-center justify-center rounded-md border border-border/60 p-2 text-text-muted hover:bg-surface-hover hover:text-white"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Linked Client</span>
+                                <select
+                                    value={newBoardClientId}
+                                    onChange={(e) => {
+                                        setNewBoardClientId(e.target.value);
+                                        if (!newBoardName.trim()) {
+                                            const selected = clientById.get(e.target.value);
+                                            if (selected) setNewBoardName(selected.name);
+                                        }
+                                    }}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                >
+                                    <option value="">Select client</option>
+                                    {clientOptions.map((client) => (
+                                        <option key={client.id} value={client.id}>
+                                            {client.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Board Name</span>
+                                <input
+                                    value={newBoardName}
+                                    onChange={(e) => setNewBoardName(e.target.value)}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                    placeholder="Enter board name"
+                                />
+                            </label>
+                            {boardExistsInTarget && (
+                                <div className="text-xs text-amber-300">
+                                    A board with that name already exists in this team.
+                                </div>
+                            )}
+                            {clientOptions.length === 0 && (
+                                <div className="text-xs text-text-muted">
+                                    No active clients are available yet. Add clients in Client Setup first.
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={closeCreateBoardModal}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleCreateBoard}
+                                disabled={isMutating || !newBoardName.trim() || !newBoardClientId || boardExistsInTarget || clientOptions.length === 0}
+                                className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/15 px-3 py-2 text-sm text-white hover:bg-primary/25 disabled:opacity-60"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Create Board
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ), modalRoot)}
+            {editFolderTarget && modalRoot && createPortal((
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="flex items-center justify-between border-b border-border/50 bg-surface/80 px-5 py-4">
+                            <div>
+                                <div className="text-sm font-semibold text-text-main">Rename Team</div>
+                                <div className="text-xs text-text-muted">Update the team name shown in the folder view.</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setEditFolderTarget(null)}
+                                className="inline-flex items-center justify-center rounded-md border border-border/60 p-2 text-text-muted hover:bg-surface-hover hover:text-white"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Team Name</span>
+                                <input
+                                    value={editFolderName}
+                                    onChange={(e) => setEditFolderName(e.target.value)}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                    placeholder="Enter team name"
+                                />
+                            </label>
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setEditFolderTarget(null)}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleEditFolder}
+                                disabled={isMutating || !editFolderName.trim()}
+                                className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/15 px-3 py-2 text-sm text-white hover:bg-primary/25 disabled:opacity-60"
+                            >
+                                <Pencil className="w-4 h-4" />
+                                Save Team
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ), modalRoot)}
+            {editBoardTarget && modalRoot && createPortal((
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="flex items-center justify-between border-b border-border/50 bg-surface/80 px-5 py-4">
+                            <div>
+                                <div className="text-sm font-semibold text-text-main">Edit Board</div>
+                                <div className="text-xs text-text-muted">Rename the board and update its linked client.</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setEditBoardTarget(null)}
+                                className="inline-flex items-center justify-center rounded-md border border-border/60 p-2 text-text-muted hover:bg-surface-hover hover:text-white"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Linked Client</span>
+                                <select
+                                    value={editBoardClientId}
+                                    onChange={(e) => setEditBoardClientId(e.target.value)}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                >
+                                    <option value="">Select client</option>
+                                    {clientOptions.map((client) => (
+                                        <option key={client.id} value={client.id}>
+                                            {client.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <label className="block space-y-1">
+                                <span className="text-[11px] uppercase tracking-wider text-text-muted">Board Name</span>
+                                <input
+                                    value={editBoardName}
+                                    onChange={(e) => setEditBoardName(e.target.value)}
+                                    className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                    placeholder="Enter board name"
+                                />
+                            </label>
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setEditBoardTarget(null)}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleEditBoard}
+                                disabled={isMutating || !editBoardName.trim() || !editBoardClientId}
+                                className="inline-flex items-center gap-2 rounded-md border border-primary/40 bg-primary/15 px-3 py-2 text-sm text-white hover:bg-primary/25 disabled:opacity-60"
+                            >
+                                <Pencil className="w-4 h-4" />
+                                Save Board
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ), modalRoot)}
+            {deleteTarget && modalRoot && createPortal((
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-[#111318] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+                        <div className="border-b border-border/50 bg-surface/80 px-5 py-4">
+                            <div className="text-sm font-semibold text-text-main">Remove {deleteTarget.type === "folder" ? "Folder" : "Board"}</div>
+                            <div className="mt-1 text-xs text-text-muted">
+                                This will remove <span className="font-medium text-white">{deleteTarget.name}</span> from the client panel.
+                            </div>
+                        </div>
+                        <div className="px-5 py-4 text-sm text-text-muted">
+                            {`Any editable tasks saved inside this ${deleteTarget.type} will also be removed from Mission Control.`}
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-border/50 bg-surface/50 px-5 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setDeleteTarget(null)}
+                                className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleDeleteTarget}
+                                disabled={isMutating}
+                                className="inline-flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200 hover:bg-red-500/20 disabled:opacity-60"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                                Remove
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ), modalRoot)}
         </aside>
     );
 }
