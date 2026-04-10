@@ -87,6 +87,8 @@ export interface ClientDirectoryRecord {
     dealType: string;
     min: number | null;
     max: number | null;
+    netsuiteProjectId: string;
+    netsuiteProjectName: string;
     isActive: boolean;
     isInternal: boolean;
     sortOrder: number;
@@ -437,6 +439,8 @@ function mapClientDirectory(row: any): ClientDirectoryRecord {
         dealType: String(row.dealType ?? "").trim(),
         min: row.min == null ? null : Number(row.min),
         max: row.max == null ? null : Number(row.max),
+        netsuiteProjectId: String(row.netsuiteProjectId ?? "").trim(),
+        netsuiteProjectName: String(row.netsuiteProjectName ?? "").trim(),
         isActive: Boolean(row.isActive ?? true),
         isInternal: Boolean(row.isInternal ?? false),
         sortOrder: Number(row.sortOrder ?? 0),
@@ -625,6 +629,8 @@ async function ensureClientDirectorySeeded() {
             dealType: defaults.dealType,
             min: defaults.min,
             max: defaults.max,
+            netsuiteProjectId: "",
+            netsuiteProjectName: "",
             isActive: true,
             isInternal: false,
             sortOrder: defaults.sortOrder,
@@ -1398,6 +1404,8 @@ export async function saveClientDirectoryEntry(input: {
     dealType?: string;
     min?: number | null;
     max?: number | null;
+    netsuiteProjectId?: string;
+    netsuiteProjectName?: string;
     isActive?: boolean;
     isInternal?: boolean;
     sortOrder?: number | null;
@@ -1431,6 +1439,8 @@ export async function saveClientDirectoryEntry(input: {
             dealType: String(input.dealType ?? "").trim(),
             min: input.min == null ? null : Number(input.min),
             max: input.max == null ? null : Number(input.max),
+            netsuiteProjectId: String(input.netsuiteProjectId ?? "").trim(),
+            netsuiteProjectName: String(input.netsuiteProjectName ?? "").trim(),
             isActive: input.isActive !== false,
             isInternal: Boolean(input.isInternal ?? false),
             sortOrder: input.sortOrder == null ? 0 : Number(input.sortOrder),
@@ -1444,6 +1454,8 @@ export async function saveClientDirectoryEntry(input: {
             dealType: String(input.dealType ?? "").trim(),
             min: input.min == null ? null : Number(input.min),
             max: input.max == null ? null : Number(input.max),
+            netsuiteProjectId: String(input.netsuiteProjectId ?? "").trim(),
+            netsuiteProjectName: String(input.netsuiteProjectName ?? "").trim(),
             isActive: input.isActive !== false,
             isInternal: Boolean(input.isInternal ?? false),
             sortOrder: input.sortOrder == null ? 0 : Number(input.sortOrder),

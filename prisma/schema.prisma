@@ -51,6 +51,8 @@ model ClientDirectory {
   dealType  String?
   min       Float?
   max       Float?
+  netsuiteProjectId String?
+  netsuiteProjectName String?
   isActive  Boolean  @default(true)
   isInternal Boolean @default(false)
   sortOrder Int      @default(0)

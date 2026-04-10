@@ -102,6 +102,8 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                 dealType: currentClient.dealType,
                 min: currentClient.min,
                 max: currentClient.max,
+                netsuiteProjectId: currentClient.netsuiteProjectId,
+                netsuiteProjectName: currentClient.netsuiteProjectName,
                 isActive: currentClient.isActive,
                 isInternal: currentClient.isInternal,
                 sortOrder: currentClient.sortOrder,
@@ -166,6 +168,8 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                 dealType: "",
                 min: null,
                 max: null,
+                netsuiteProjectId: "",
+                netsuiteProjectName: "",
                 contacts: [],
                 isActive: true,
                 isInternal: false,
@@ -332,6 +336,8 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                     <th className="px-4 py-3">Deal Type</th>
                                     <th className="px-4 py-3 text-right">Min</th>
                                     <th className="px-4 py-3 text-right">Max</th>
+                                    <th className="px-4 py-3">NetSuite Project</th>
+                                    <th className="px-4 py-3">NetSuite ID</th>
                                     <th className="px-4 py-3">Status</th>
                                     <th className="px-4 py-3">Internal</th>
                                     <th className="px-4 py-3">Contacts</th>
@@ -393,6 +399,22 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                         />
                                     </td>
                                     <td className="px-4 py-3">
+                                        <input
+                                            value={client.netsuiteProjectName}
+                                            onChange={(event) => handleFieldChange(client.id, { netsuiteProjectName: event.target.value })}
+                                            className="w-64 rounded-lg border border-border/60 bg-background/50 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                            placeholder="Reimagine Office Furnishings"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        <input
+                                            value={client.netsuiteProjectId}
+                                            onChange={(event) => handleFieldChange(client.id, { netsuiteProjectId: event.target.value })}
+                                            className="w-28 rounded-lg border border-border/60 bg-background/50 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                            placeholder="328531"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-3">
                                         <button
                                             type="button"
                                             onClick={() => handleFieldChange(client.id, { isActive: !client.isActive })}
@@ -444,7 +466,7 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                             ))}
                             {orderedClients.length === 0 && (
                                 <tr>
-                                    <td colSpan={10} className="px-6 py-10 text-center text-sm text-text-muted">
+                                    <td colSpan={12} className="px-6 py-10 text-center text-sm text-text-muted">
                                         No clients have been set up yet.
                                     </td>
                                 </tr>
@@ -461,7 +483,7 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                 <td className="px-4 py-3 text-right text-sm font-semibold text-white">
                                     {externalTotals.max.toFixed(1)}
                                 </td>
-                                <td colSpan={4}></td>
+                                <td colSpan={6}></td>
                             </tr>
                         </tfoot>
                     </table>
