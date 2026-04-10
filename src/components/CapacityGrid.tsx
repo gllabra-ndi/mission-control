@@ -32,7 +32,6 @@ interface CapacityGridProps {
     plannedRollups?: EditableTaskPlannedRollupRecord[];
     billableRollups?: EditableTaskBillableRollupRecord[];
     onNavigateWeek?: (nextWeek: string) => void;
-    onSelectTab?: (tab: string) => void;
     onOpenTaskBoard?: (target: {
         listId?: string | null;
         folderId?: string | null;
@@ -63,6 +62,10 @@ function formatConsultantHeaderName(value: string) {
     const tokens = String(value || "").trim().split(/\s+/).filter(Boolean);
     if (tokens.length <= 1) return tokens[0] ?? "";
     return [tokens[0], ...tokens.slice(1).map((token) => `${token[0]?.toUpperCase() || ""}.`)].join(" ");
+}
+
+function isClairioClient(value: string) {
+    return normalizeName(value) === "clairio";
 }
 
 function clientIdFromName(value: string) {
@@ -143,7 +146,6 @@ export function CapacityGrid({
     plannedRollups = [],
     billableRollups = [],
     onNavigateWeek,
-    onSelectTab,
     onOpenTaskBoard,
     isWeekLoading = false,
 }: CapacityGridProps) {
@@ -624,6 +626,23 @@ export function CapacityGrid({
         });
     }, [getClientMetadata, rows, visibleResources]);
 
+    const displayRows = useMemo(() => {
+        const regularRows: CapacityGridRow[] = [];
+        const clairioRows: CapacityGridRow[] = [];
+
+        rows.forEach((row) => {
+            const clientMeta = getClientMetadata(row);
+            const clientName = String(clientMeta?.name ?? row.client ?? "");
+            if (isClairioClient(clientName)) {
+                clairioRows.push(row);
+            } else {
+                regularRows.push(row);
+            }
+        });
+
+        return [...regularRows, ...clairioRows];
+    }, [getClientMetadata, rows]);
+
     const totals = useMemo(() => {
         const hoursByResource: Record<string, number> = {};
         visibleResources.forEach((resource) => {
@@ -922,13 +941,6 @@ export function CapacityGrid({
                         <Copy className="w-3.5 h-3.5" />
                         Copy Prior Week
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => onSelectTab?.("client-setup")}
-                        className="inline-flex items-center gap-2 rounded-xl border border-border/60 bg-[#0f1320]/80 px-4 py-2 text-xs font-semibold text-text-main hover:bg-surface-hover"
-                    >
-                        Client Setup
-                    </button>
                     <span className="rounded-full border border-border/50 bg-surface/20 px-3 py-1 text-[11px] text-text-muted">
                         {isWeekLoading ? "Loading..." : isPending ? "Saving..." : "Weekly client plan saved locally"}
                     </span>
@@ -1004,7 +1016,7 @@ export function CapacityGrid({
                         </tr>
                     </thead>
                     <tbody>
-                        {rows.map((row, rowIndex) => {
+                        {displayRows.map((row, rowIndex) => {
                             const stats = rowStats.find((s) => s.id === row.id);
                             const rowTotal = Number(stats?.total ?? 0);
                             const rowActualTotal = visibleResources.reduce((sum, resource) => sum + Number(getBillableActualsForCell(row, resource) ?? 0), 0);

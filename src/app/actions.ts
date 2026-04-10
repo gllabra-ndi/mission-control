@@ -855,9 +855,20 @@ function preferClientName(current: string, incoming: string) {
     return right.length >= left.length ? right : left;
 }
 
-async function applyClientDirectoryMetadataToCapacityPayload(payload: CapacityGridPayload): Promise<{ payload: CapacityGridPayload; changed: boolean }> {
+function getCurrentDashboardWeekStart() {
+    return format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
+}
+
+function isCurrentOrFutureDashboardWeek(week: string) {
+    return String(week || "") >= getCurrentDashboardWeekStart();
+}
+
+async function applyClientDirectoryMetadataToCapacityPayload(
+    week: string,
+    payload: CapacityGridPayload
+): Promise<{ payload: CapacityGridPayload; changed: boolean }> {
     const clientDirectory = (await loadClientDirectoryRecords()).filter((client: ClientDirectoryRecord) => client.isActive);
-    if (clientDirectory.length === 0) {
+    if (clientDirectory.length === 0 || !isCurrentOrFutureDashboardWeek(week)) {
         return { payload, changed: false };
     }
 
@@ -888,12 +899,12 @@ async function applyClientDirectoryMetadataToCapacityPayload(payload: CapacityGr
         const nextRow: CapacityGridRow = {
             ...baseRow,
             id: client.id,
-            team: Number(baseRow.team ?? client.team ?? 0),
-            teamSa: String(baseRow.teamSa ?? client.sa ?? ""),
-            dealType: String(baseRow.dealType ?? client.dealType ?? ""),
-            wkMin: Number(baseRow.wkMin ?? client.min ?? 0),
-            wkMax: Number(baseRow.wkMax ?? client.max ?? 0),
-            client: preferClientName(String(baseRow.client ?? ""), client.name),
+            team: Number(client.team ?? 0),
+            teamSa: String(client.sa ?? ""),
+            dealType: String(client.dealType ?? ""),
+            wkMin: Number(client.min ?? 0),
+            wkMax: Number(client.max ?? 0),
+            client: client.name,
             allocations: buildEmptyAllocations(payload.resources),
             notes: String(baseRow.notes ?? ""),
         };
@@ -923,6 +934,40 @@ async function applyClientDirectoryMetadataToCapacityPayload(payload: CapacityGr
         payload: changed ? { ...payload, rows: nextRows } : payload,
         changed,
     };
+}
+
+async function syncCurrentAndFutureCapacityGridMetadataFromClientDirectory() {
+    const capacityGridModel = (prisma as any).capacityGridConfig;
+    if (!capacityGridModel) return;
+
+    const currentWeekStart = getCurrentDashboardWeekStart();
+    const rows = await capacityGridModel.findMany({
+        where: {
+            week: {
+                gte: currentWeekStart,
+            },
+        },
+    });
+
+    for (const row of rows) {
+        try {
+            const parsed = sanitizeCapacityPayload({
+                resources: JSON.parse(String(row.resourcesJson || "[]")),
+                rows: JSON.parse(String(row.rowsJson || "[]")),
+            });
+            const next = await applyClientDirectoryMetadataToCapacityPayload(String(row.week), parsed);
+            if (!next.changed) continue;
+            await capacityGridModel.update({
+                where: { week: String(row.week) },
+                data: {
+                    resourcesJson: JSON.stringify(next.payload.resources),
+                    rowsJson: JSON.stringify(next.payload.rows),
+                },
+            });
+        } catch {
+            // Ignore malformed historical rows here; normal grid loads will rebuild them if needed.
+        }
+    }
 }
 
 function sanitizeCapacityPayload(input: any, forcedResources?: CapacityGridResource[]): CapacityGridPayload {
@@ -1406,6 +1451,7 @@ export async function saveClientDirectoryEntry(input: {
         },
     });
 
+    await syncCurrentAndFutureCapacityGridMetadataFromClientDirectory();
     revalidatePath("/");
     revalidatePath("/settings");
     return mapClientDirectory(saved);
@@ -1422,6 +1468,7 @@ export async function deleteClientDirectoryEntry(clientId: string) {
         where: { id: normalizedId },
     });
 
+    await syncCurrentAndFutureCapacityGridMetadataFromClientDirectory();
     revalidatePath("/");
     revalidatePath("/settings");
     return { ok: true };
@@ -2254,7 +2301,7 @@ export async function getCapacityGridConfig(
         const aligned = consultants && consultants.length > 0
             ? alignCapacityPayloadToRoster(parsed, rosterResources)
             : parsed;
-        const clientDirectoryApplied = await applyClientDirectoryMetadataToCapacityPayload(aligned);
+        const clientDirectoryApplied = await applyClientDirectoryMetadataToCapacityPayload(week, aligned);
 
         const hasResourceDiff =
             JSON.stringify(clientDirectoryApplied.payload.resources) !== JSON.stringify(parsed.resources) ||
@@ -2351,7 +2398,7 @@ export async function copyCapacityGridFromPriorWeek(week: string, consultants?: 
 
     const targetResources = currentGrid.resources.length > 0 ? currentGrid.resources : previousGrid.resources;
     const remappedPrevious = remapCapacityPayloadToResources(previousGrid, targetResources);
-    const alignedCurrent = await applyClientDirectoryMetadataToCapacityPayload(currentGrid);
+    const alignedCurrent = await applyClientDirectoryMetadataToCapacityPayload(week, currentGrid);
 
     const previousRowsById = new Map<string, CapacityGridRow>();
     const previousRowsByName = new Map<string, CapacityGridRow>();

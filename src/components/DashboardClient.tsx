@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { format, startOfWeek } from "date-fns";
 import { Sidebar, FolderWithLists } from "@/components/Sidebar";
 import { EditableTaskBoard } from "@/components/EditableTaskBoard";
 import { CommandCenter } from "@/components/CommandCenter";
@@ -201,6 +202,53 @@ function pickPreferredConsultantName(currentName: string, incomingName: string) 
 
 function normalizeConsultantNameKey(value: string) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function getCurrentDashboardWeekStart() {
+    return format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd");
+}
+
+function isClientSetupSourceOfTruthWeek(week: string) {
+    return String(week || "") >= getCurrentDashboardWeekStart();
+}
+
+function dedupeRosterEntries<T extends { id: number; name: string }>(entries: T[]) {
+    const byId = new Map<number, T>();
+    const idByNameKey = new Map<string, number>();
+
+    entries.forEach((entry) => {
+        const consultantId = Number(entry?.id ?? 0);
+        const consultantName = String(entry?.name ?? "").trim();
+        if (!consultantName) return;
+
+        const nameKey = normalizeConsultantNameKey(consultantName);
+        const existingId =
+            (consultantId > 0 && byId.has(consultantId) ? consultantId : null)
+            ?? (nameKey ? idByNameKey.get(nameKey) ?? null : null);
+
+        if (existingId) {
+            const current = byId.get(existingId);
+            if (!current) return;
+            byId.set(existingId, {
+                ...current,
+                ...entry,
+                id: existingId,
+                name: pickPreferredConsultantName(current.name, consultantName),
+            });
+            if (nameKey) idByNameKey.set(nameKey, existingId);
+            return;
+        }
+
+        const stableId = consultantId > 0 ? consultantId : -(byId.size + 1);
+        byId.set(stableId, {
+            ...entry,
+            id: stableId,
+            name: consultantName,
+        });
+        if (nameKey) idByNameKey.set(nameKey, stableId);
+    });
+
+    return Array.from(byId.values());
 }
 
 export function DashboardClient({
@@ -826,7 +874,7 @@ export function DashboardClient({
         const gridResources = Array.isArray(capacityGridState?.resources) ? capacityGridState.resources : [];
         const provisionedIds = new Set(mergedConsultants.map((consultant) => consultant.id));
         if (gridResources.length > 0) {
-            return gridResources
+            return dedupeRosterEntries(gridResources
                 .map((resource: any, idx: number) => ({
                     id: Number(resource?.consultantId ?? -(idx + 1)),
                     name: String(resource?.name ?? "").trim(),
@@ -836,9 +884,9 @@ export function DashboardClient({
                     if (consultant.removed) return true;
                     return provisionedIds.has(consultant.id);
                 })
-                .filter((consultant) => consultant.name.length > 0);
+                .filter((consultant) => consultant.name.length > 0));
         }
-        return mergedConsultants;
+        return dedupeRosterEntries(mergedConsultants);
     }, [capacityGridState?.resources, mergedConsultants]);
 
     const activeConsultantNames = useMemo(
@@ -1150,22 +1198,35 @@ export function DashboardClient({
     }, [activeWeekStrState]);
 
     const handleClientDirectoryReplace = useCallback((nextClients: ClientDirectoryRecord[]) => {
-        const nextGrid = syncCapacityGridWithClientDirectory(capacityGridState, nextClients);
-        setCapacityGridState(nextGrid);
+        const shouldSyncActiveWeek = isClientSetupSourceOfTruthWeek(activeWeekStrState);
+        const nextGrid = shouldSyncActiveWeek ? syncCapacityGridWithClientDirectory(capacityGridState, nextClients) : capacityGridState;
+        if (shouldSyncActiveWeek) {
+            setCapacityGridState(nextGrid);
+        }
         setDashboardConfigState((prev: any) => ({
             ...prev,
             clientDirectory: nextClients,
-            clientConfigs: syncClientConfigsWithDirectory(
-                Array.isArray(prev?.clientConfigs) ? prev.clientConfigs : [],
-                nextClients
-            ),
-            capacityGridConfig: nextGrid,
-            capacityGridConfigsForYear: upsertCapacityGridWeekRecord(
-                Array.isArray(prev?.capacityGridConfigsForYear) ? prev.capacityGridConfigsForYear : [],
-                activeWeekStrState,
-                nextGrid
-            ),
+            clientConfigs: shouldSyncActiveWeek
+                ? syncClientConfigsWithDirectory(
+                    Array.isArray(prev?.clientConfigs) ? prev.clientConfigs : [],
+                    nextClients
+                )
+                : prev?.clientConfigs,
+            capacityGridConfig: shouldSyncActiveWeek ? nextGrid : prev?.capacityGridConfig,
+            capacityGridConfigsForYear: shouldSyncActiveWeek
+                ? upsertCapacityGridWeekRecord(
+                    Array.isArray(prev?.capacityGridConfigsForYear) ? prev.capacityGridConfigsForYear : [],
+                    activeWeekStrState,
+                    nextGrid
+                )
+                : prev?.capacityGridConfigsForYear,
         }));
+        weekSnapshotCacheRef.current.forEach((_snapshot, cacheKey) => {
+            const [week] = String(cacheKey).split("::");
+            if (isClientSetupSourceOfTruthWeek(week)) {
+                weekSnapshotCacheRef.current.delete(cacheKey);
+            }
+        });
     }, [activeWeekStrState, capacityGridState]);
 
     return (
@@ -1290,7 +1351,6 @@ export function DashboardClient({
                                 plannedRollups={taskPlannedRollupsState}
                                 billableRollups={taskBillableRollupsState}
                                 onNavigateWeek={handleWeekChange}
-                                onSelectTab={handleTabSelect}
                                 onOpenTaskBoard={handleCapacityGridOpenTaskBoard}
                                 isWeekLoading={isWeekLoading}
                             />
