@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState, useEffect, Suspense, use } from "react";
+import { useMemo, Suspense, use } from "react";
 import { useRouter } from "next/navigation";
 import { format, subWeeks, addWeeks, addDays, startOfWeek, startOfMonth, endOfMonth } from "date-fns";
 import { ImportedTask, TimeEntry } from "@/lib/imported-data";
+import { computeCapacityHeaderMetrics, getAllocationHours, normalizeDashboardName } from "@/lib/dashboardMetrics";
 import { AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -35,15 +36,6 @@ interface ClientPaceTrackerRow {
     statusLabel: string;
 }
 
-interface CapacityHeaderMetrics {
-    totalCapacity: number;
-    planned: number;
-    actuals: number;
-    wkMinTotal: number;
-    wkMaxTotal: number;
-    gapToMin: number;
-}
-
 const DEFAULT_LEAD_TARGETS: Record<string, number> = {
     "James W.": 117,
     "Monica": 110,
@@ -54,15 +46,6 @@ const DEFAULT_LEAD_TARGETS: Record<string, number> = {
     "Nikko": 3,
     "James/Omair": 2,
 };
-
-function normalizeName(value: string): string {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-function getAllocationHours(cell: unknown) {
-    const legacyCell = cell as { hours?: number; wt?: number; wPlus?: number } | undefined;
-    return Number(legacyCell?.hours ?? Number(legacyCell?.wt ?? 0) + Number(legacyCell?.wPlus ?? 0));
-}
 
 function CommandMetrics({
     tasksPromise,
@@ -136,8 +119,8 @@ function CommandMetrics({
             const taskMatch = tasksMap.get(entry.task?.id);
             const durationHours = (Number(entry.duration) || 0) / (1000 * 60 * 60);
             if (durationHours <= 0) return;
-            const idKey = normalizeName(String(taskMatch?.list?.id ?? ""));
-            const nameKey = normalizeName(String(taskMatch?.list?.name ?? ""));
+            const idKey = normalizeDashboardName(String(taskMatch?.list?.id ?? ""));
+            const nameKey = normalizeDashboardName(String(taskMatch?.list?.name ?? ""));
             if (idKey) map.set(idKey, (map.get(idKey) || 0) + durationHours);
             if (nameKey) map.set(nameKey, (map.get(nameKey) || 0) + durationHours);
         });
@@ -163,20 +146,6 @@ function CommandMetrics({
     const monthPacingStatusClass = monthToDateBilledHrs >= monthPacingTarget ? "text-emerald-400" : "text-amber-300";
     const monthProgressLabel = `${Math.round(activeMonthProgress * 100)}% THROUGH MONTH`;
 
-    const taskScopeLabelsByType = useMemo(() => {
-        const listLabels = new Map<string, string>();
-        const folderLabels = new Map<string, string>();
-        (tasks || []).forEach((task: any) => {
-            const listId = String(task?.list?.id ?? "").trim();
-            const listName = String(task?.list?.name ?? "").trim();
-            const folderId = String(task?.folder?.id ?? "").trim();
-            const folderName = String(task?.folder?.name ?? "").trim();
-            if (listId && listName && !listLabels.has(listId)) listLabels.set(listId, listName);
-            if (folderId && folderName && !folderLabels.has(folderId)) folderLabels.set(folderId, folderName);
-        });
-        return { listLabels, folderLabels };
-    }, [tasks]);
-
     const clientDirectoryById = useMemo(() => {
         const map = new Map<string, any>();
         const rows = Array.isArray(dbConfig?.clientDirectory) ? dbConfig.clientDirectory : [];
@@ -188,86 +157,14 @@ function CommandMetrics({
         return map;
     }, [dbConfig?.clientDirectory]);
 
-    const buildCapacityHeaderMetrics = useMemo(() => {
-        return (payload: any, rollups: any[] = []): CapacityHeaderMetrics => {
-            const resources = (Array.isArray(payload?.resources) ? payload.resources : []).filter((resource: any) => !Boolean(resource?.removed));
-            const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-
-            const totalCapacity = resources.reduce((sum: number, resource: any) => {
-                return sum + Number(resource?.billableCapacity ?? 40);
-            }, 0);
-
-            const planned = rows.reduce((sum: number, row: any) => {
-                return sum + resources.reduce((rowSum: number, resource: any) => {
-                    return rowSum + Number(row?.allocations?.[resource.id]?.hours ?? 0);
-                }, 0);
-            }, 0);
-
-            const wkMinTotal = rows.reduce((sum: number, row: any) => sum + Number(row?.wkMin ?? 0), 0);
-            const wkMaxTotal = rows.reduce((sum: number, row: any) => sum + Number(row?.wkMax ?? 0), 0);
-
-            const actuals = (Array.isArray(rollups) ? rollups : []).reduce((sum: number, rollup: any) => {
-                const assigneeFullKey = normalizeName(String(rollup?.assignee ?? ""));
-                const assigneeFirstKey = normalizeName(String(rollup?.assignee ?? "").split(/\s+/)[0] || "");
-                const consultantMatch = resources.some((resource: any) => {
-                    const resourceFullKey = normalizeName(String(resource?.name ?? ""));
-                    const resourceFirstKey = normalizeName(String(resource?.name ?? "").split(/\s+/)[0] || "");
-                    return (
-                        (resourceFullKey && assigneeFullKey === resourceFullKey)
-                        || (resourceFirstKey && assigneeFullKey === resourceFirstKey)
-                        || (resourceFullKey && assigneeFirstKey === resourceFirstKey)
-                        || (resourceFirstKey && assigneeFirstKey === resourceFirstKey)
-                    );
-                });
-                if (!consultantMatch) return sum;
-
-                const scopeLabels = (() => {
-                    const scopeType = String(rollup?.scopeType ?? "");
-                    const scopeId = String(rollup?.scopeId ?? "");
-                    if (scopeType === "list") {
-                        return [taskScopeLabelsByType.listLabels.get(scopeId) ?? scopeId].filter(Boolean);
-                    }
-                    if (scopeType === "folder") {
-                        return [taskScopeLabelsByType.folderLabels.get(scopeId) ?? scopeId].filter(Boolean);
-                    }
-                    return [scopeId].filter(Boolean);
-                })();
-
-                const rowMatch = rows.some((row: any) => {
-                    const rowClientKey = normalizeName(String(row?.client ?? ""));
-                    const rowIdKey = normalizeName(String(row?.id ?? ""));
-                    return scopeLabels.some((label) => {
-                        const labelKey = normalizeName(label);
-                        return labelKey.length > 0 && (
-                            labelKey === rowClientKey
-                            || labelKey === rowIdKey
-                            || labelKey.includes(rowClientKey)
-                            || rowClientKey.includes(labelKey)
-                        );
-                    });
-                });
-
-                if (!rowMatch) return sum;
-                return sum + Number(rollup?.hours ?? 0);
-            }, 0);
-
-            return {
-                totalCapacity: Number(totalCapacity.toFixed(1)),
-                planned: Number(planned.toFixed(1)),
-                actuals: Number(actuals.toFixed(1)),
-                wkMinTotal: Number(wkMinTotal.toFixed(1)),
-                wkMaxTotal: Number(wkMaxTotal.toFixed(1)),
-                gapToMin: Number((planned - wkMinTotal).toFixed(1)),
-            };
-        };
-    }, [taskScopeLabelsByType]);
-
     const currentCapacityMetrics = useMemo(
-        () => buildCapacityHeaderMetrics(
-            dbConfig?.capacityGridConfig,
-            Array.isArray(dbConfig?.taskBillableRollups) ? dbConfig.taskBillableRollups : []
-        ),
-        [buildCapacityHeaderMetrics, dbConfig]
+        () => computeCapacityHeaderMetrics({
+            payload: dbConfig?.capacityGridConfig,
+            billableRollups: Array.isArray(dbConfig?.taskBillableRollups) ? dbConfig.taskBillableRollups : [],
+            consultantConfigRows: Array.isArray(dbConfig?.consultantConfigs) ? dbConfig.consultantConfigs : [],
+            tasks: Array.isArray(tasks) ? tasks : [],
+        }),
+        [dbConfig, tasks]
     );
 
     const currentWeekCards = [
@@ -341,8 +238,8 @@ function CommandMetrics({
             const rowId = String(row?.id ?? `row-${idx + 1}`);
             const monthlyCapacity = monthCapacityRows.get(rowId);
             const clientDir = clientDirectoryById.get(rowId);
-            const idKey = normalizeName(rowId);
-            const nameKey = normalizeName(String(row?.client ?? ""));
+            const idKey = normalizeDashboardName(rowId);
+            const nameKey = normalizeDashboardName(String(row?.client ?? ""));
             const billedHours = Number(billedByClient.get(idKey) ?? billedByClient.get(nameKey) ?? 0);
             
             const monthlyMin = Number(monthlyCapacity?.monthlyMin ?? 0);

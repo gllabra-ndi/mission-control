@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
-import { spawn, execFile } from "node:child_process";
-import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
-import os from "node:os";
+import { spawn } from "node:child_process";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import puppeteer from "puppeteer";
-
-const execFileAsync = promisify(execFile);
+import { PrismaClient } from "@prisma/client";
+import { createIsolatedPostgresSchema, dropIsolatedPostgresSchema } from "./test-db-utils.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
@@ -18,36 +15,10 @@ const hostname = "127.0.0.1";
 const port = Number(process.env.REGRESSION_PORT || 3102);
 const baseUrl = `http://${hostname}:${port}`;
 const targetWeek = process.env.REGRESSION_WEEK || "2026-03-23";
-const smokeDbSource = path.resolve(repoRoot, process.env.REGRESSION_DB_SOURCE || "prisma/dev.db");
 const distDir = `.next-regression-${port}-${Date.now()}`;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function ensureReadable(filePath) {
-    await access(filePath, fsConstants.R_OK);
-}
-
-async function createIsolatedDbCopy() {
-    await ensureReadable(smokeDbSource);
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "mission-control-regression-"));
-    const tempDbPath = path.join(tempDir, "regression.db");
-    await cp(smokeDbSource, tempDbPath);
-    return {
-        tempDir,
-        tempDbPath,
-        databaseUrl: `file:${tempDbPath}`,
-    };
-}
-
-async function runSql(dbPath, sql) {
-    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql], {
-        cwd: repoRoot,
-        env: process.env,
-    });
-    const text = String(stdout || "").trim();
-    return text ? JSON.parse(text) : [];
 }
 
 async function syncSchema(databaseUrl) {
@@ -66,7 +37,7 @@ async function syncSchema(databaseUrl) {
 async function buildApp(databaseUrl) {
     const child = spawn("npm", ["run", "build"], {
         cwd: repoRoot,
-        env: { ...process.env, DATABASE_URL: databaseUrl, NEXT_DIST_DIR: distDir, CI: "true" },
+        env: { ...process.env, DATABASE_URL: databaseUrl, AUTH_ENABLED: "false", NEXT_DIST_DIR: distDir, CI: "true" },
         stdio: "inherit",
     });
     const exitCode = await new Promise((resolve, reject) => {
@@ -79,7 +50,7 @@ async function buildApp(databaseUrl) {
 function startServer(databaseUrl) {
     return spawn("npx", ["next", "start", "--hostname", hostname, "--port", String(port)], {
         cwd: repoRoot,
-        env: { ...process.env, DATABASE_URL: databaseUrl, NEXT_DIST_DIR: distDir, PORT: String(port), CI: "true" },
+        env: { ...process.env, DATABASE_URL: databaseUrl, AUTH_ENABLED: "false", NEXT_DIST_DIR: distDir, PORT: String(port), CI: "true" },
         stdio: "inherit",
     });
 }
@@ -122,39 +93,49 @@ async function clickTaskBySubject(page, subject) {
 async function main() {
     let browser = null;
     let server = null;
-    let tempDir = null;
+    let isolatedDb = null;
+    let isolatedPrisma = null;
     let originalTsconfig = null;
 
     try {
         originalTsconfig = await readFile(path.join(repoRoot, "tsconfig.json"), "utf8");
-        const isolatedDb = await createIsolatedDbCopy();
-        tempDir = isolatedDb.tempDir;
+        isolatedDb = await createIsolatedPostgresSchema("regression");
         await syncSchema(isolatedDb.databaseUrl);
         await buildApp(isolatedDb.databaseUrl);
         server = startServer(isolatedDb.databaseUrl);
         await waitForServer();
 
-        const [estimateCandidate] = await runSql(isolatedDb.tempDbPath, `
-            select scopeType, scopeId, subject, estimateHours
-            from EditableTask
-            where sourceTaskId is not null
+        isolatedPrisma = new PrismaClient({
+            datasources: {
+                db: {
+                    url: isolatedDb.databaseUrl,
+                },
+            },
+        });
+
+        const estimateCandidates = await isolatedPrisma.$queryRawUnsafe(`
+            select "scopeType", "scopeId", subject, "estimateHours"
+            from "EditableTask"
+            where "sourceTaskId" is not null
               and week <= '${targetWeek}'
-              and (closedDate is null or closedDate >= '${targetWeek}')
-            order by estimateHours desc, updatedAt desc
+              and ("closedDate" is null or "closedDate" >= '${targetWeek}')
+            order by "estimateHours" desc, "updatedAt" desc
             limit 1;
         `);
+        const [estimateCandidate] = estimateCandidates;
         assert(estimateCandidate, "No editable placeholder task available for estimate regression check");
 
-        const [carryForwardCandidate] = await runSql(isolatedDb.tempDbPath, `
+        const carryForwardCandidates = await isolatedPrisma.$queryRawUnsafe(`
             select assignee, subject
-            from EditableTask
+            from "EditableTask"
             where assignee <> ''
               and week < '${targetWeek}'
-              and plannedWeek <= '${targetWeek}'
-              and (closedDate is null or closedDate > '${targetWeek}')
-            order by updatedAt desc
+              and "plannedWeek" <= '${targetWeek}'
+              and ("closedDate" is null or "closedDate" > '${targetWeek}')
+            order by "updatedAt" desc
             limit 1;
         `);
+        const [carryForwardCandidate] = carryForwardCandidates;
         assert(carryForwardCandidate, "No carry-forward open task available for timesheet regression check");
 
         browser = await puppeteer.launch({
@@ -205,11 +186,16 @@ async function main() {
     } finally {
         if (browser) await browser.close();
         if (server) await stopServer(server);
+        if (isolatedPrisma) {
+            await isolatedPrisma.$disconnect();
+        }
         if (originalTsconfig !== null) {
             await writeFile(path.join(repoRoot, "tsconfig.json"), originalTsconfig, "utf8");
         }
         await rm(path.join(repoRoot, distDir), { recursive: true, force: true });
-        if (tempDir) await rm(tempDir, { recursive: true, force: true });
+        if (isolatedDb) {
+            await dropIsolatedPostgresSchema(isolatedDb.baseDatabaseUrl, isolatedDb.schemaName);
+        }
     }
 }
 

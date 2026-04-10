@@ -56,6 +56,136 @@ const EMPTY_CAPACITY_GRID: CapacityGridPayload = { resources: [], rows: [] };
 const VALID_TABS = new Set(["issues", "editable-tasks", "command-center", "trends", "capacity-trends", "consultant-utilization", "timesheets", "capacity-grid", "client-setup", "backlog-growth", "client-dashboard"]);
 const normalizeTab = (tab?: string) => (tab && VALID_TABS.has(tab) ? tab : "command-center");
 type DashboardWeekSnapshot = Awaited<ReturnType<typeof loadDashboardWeekData>>;
+type ConsultantCapacityConfig = { maxCapacity: number; billableCapacity: number; notes: string };
+
+function buildConsultantConfigRows(configsById: Record<number, ConsultantCapacityConfig>) {
+    return Object.entries(configsById).map(([consultantId, cfg]) => ({
+        consultantId: Number(consultantId),
+        maxCapacity: Number(cfg.maxCapacity ?? 40),
+        billableCapacity: Number(cfg.billableCapacity ?? 40),
+        notes: String(cfg.notes ?? ""),
+    }));
+}
+
+function buildConsultantConfigRecords(
+    existingRows: any[],
+    week: string,
+    configsById: Record<number, ConsultantCapacityConfig>
+) {
+    const existingById = new Map<number, any>();
+    (Array.isArray(existingRows) ? existingRows : []).forEach((row: any) => {
+        const consultantId = Number(row?.consultantId ?? 0);
+        if (consultantId > 0) {
+            existingById.set(consultantId, row);
+        }
+    });
+
+    return Object.entries(configsById).map(([consultantId, cfg]) => {
+        const numericConsultantId = Number(consultantId);
+        const existing = existingById.get(numericConsultantId) ?? {};
+        return {
+            ...existing,
+            id: String(existing?.id ?? `consultant-config-${week}-${numericConsultantId}`),
+            week: String(existing?.week ?? week),
+            consultantId: numericConsultantId,
+            maxCapacity: Number(cfg.maxCapacity ?? 40),
+            billableCapacity: Number(cfg.billableCapacity ?? 40),
+            mtHrs: Number(existing?.mtHrs ?? 0),
+            wPlusHrs: Number(existing?.wPlusHrs ?? 0),
+            notes: String(cfg.notes ?? existing?.notes ?? ""),
+        };
+    });
+}
+
+function upsertCapacityGridWeekRecord(
+    rows: any[],
+    week: string,
+    payload: CapacityGridPayload
+) {
+    return rows
+        .filter((row: any) => String(row?.week ?? "") !== week)
+        .concat([{ week, payload }])
+        .sort((a: any, b: any) => String(a?.week ?? "").localeCompare(String(b?.week ?? "")));
+}
+
+function upsertConsultantConfigsForYear(
+    rows: any[],
+    week: string,
+    configsById: Record<number, ConsultantCapacityConfig>
+) {
+    const nextRows = buildConsultantConfigRows(configsById).map((row) => ({
+        week,
+        consultantId: row.consultantId,
+        maxCapacity: row.maxCapacity,
+        billableCapacity: row.billableCapacity,
+        notes: row.notes,
+    }));
+
+    return rows
+        .filter((row: any) => String(row?.week ?? "") !== week)
+        .concat(nextRows)
+        .sort((a: any, b: any) => {
+            const weekCompare = String(a?.week ?? "").localeCompare(String(b?.week ?? ""));
+            if (weekCompare !== 0) return weekCompare;
+            return Number(a?.consultantId ?? 0) - Number(b?.consultantId ?? 0);
+        });
+}
+
+function syncClientConfigsWithDirectory(rows: any[], clients: ClientDirectoryRecord[]) {
+    const byId = new Map(clients.map((client) => [String(client.id), client]));
+    const byName = new Map(
+        clients
+            .map((client) => [normalizeConsultantNameKey(client.name), client] as const)
+            .filter(([key]) => key.length > 0)
+    );
+
+    return (Array.isArray(rows) ? rows : []).map((row: any) => {
+        const match =
+            byId.get(String(row?.clientId ?? "").trim())
+            ?? byName.get(normalizeConsultantNameKey(String(row?.clientName ?? row?.clientId ?? "")));
+        if (!match) return row;
+        return {
+            ...row,
+            clientName: match.name,
+            team: match.team ?? row.team ?? 0,
+            sa: match.sa || row.sa || "",
+            dealType: match.dealType || row.dealType || "",
+            min: match.min ?? row.min ?? 0,
+            max: match.max ?? row.max ?? 0,
+        };
+    });
+}
+
+function syncCapacityGridWithClientDirectory(
+    grid: CapacityGridPayload,
+    clients: ClientDirectoryRecord[]
+): CapacityGridPayload {
+    const byId = new Map(clients.map((client) => [String(client.id), client]));
+    const byName = new Map(
+        clients
+            .map((client) => [normalizeConsultantNameKey(client.name), client] as const)
+            .filter(([key]) => key.length > 0)
+    );
+
+    return {
+        resources: Array.isArray(grid?.resources) ? grid.resources : [],
+        rows: (Array.isArray(grid?.rows) ? grid.rows : []).map((row) => {
+            const match =
+                byId.get(String(row?.id ?? "").trim())
+                ?? byName.get(normalizeConsultantNameKey(String(row?.client ?? row?.id ?? "")));
+            if (!match) return row;
+            return {
+                ...row,
+                client: match.name,
+                team: Number(match.team ?? 0),
+                teamSa: String(match.sa ?? ""),
+                dealType: String(match.dealType ?? ""),
+                wkMin: Number(match.min ?? 0),
+                wkMax: Number(match.max ?? 0),
+            };
+        }),
+    };
+}
 
 function pickPreferredConsultantName(currentName: string, incomingName: string) {
     const current = String(currentName || "").trim();
@@ -773,24 +903,6 @@ export function DashboardClient({
         setWeekDataVersion((prev) => prev + 1);
     }, [activeWeekStrState, applyWeekSnapshot, consultantsForRoster, getWeekCacheKey]);
 
-    useEffect(() => {
-        const currentSnapshot: DashboardWeekSnapshot = {
-            weekConfig: dbConfig?.weekConfig,
-            leadConfigs: dbConfig?.leadConfigs,
-            clientConfigs: dbConfig?.clientConfigs,
-            clientDirectory: dbConfig?.clientDirectory,
-            consultantConfigs: dbConfig?.consultantConfigs,
-            previousLeadConfigs: dbConfig?.previousLeadConfigs,
-            previousClientConfigs: dbConfig?.previousClientConfigs,
-            previousConsultantConfigs: dbConfig?.previousConsultantConfigs,
-            taskPlannedRollups: dbConfig?.taskPlannedRollups,
-            previousTaskBillableRollups: dbConfig?.previousTaskBillableRollups,
-            capacityGridConfig: dbConfig?.capacityGridConfig ?? EMPTY_CAPACITY_GRID,
-            taskBillableRollups: initialTaskBillableRollups,
-        };
-        weekSnapshotCacheRef.current.set(getWeekCacheKey(weekStartStr), currentSnapshot);
-    }, [dbConfig, getWeekCacheKey, initialTaskBillableRollups, initialTaskPlannedRollups, weekStartStr]);
-
     const prefetchWeekSnapshot = useCallback((week: string) => {
         const cacheKey = getWeekCacheKey(week);
         if (weekSnapshotCacheRef.current.has(cacheKey) || weekPrefetchInFlightRef.current.has(cacheKey)) {
@@ -908,12 +1020,7 @@ export function DashboardClient({
     }, [activeWeekStrState, baseConsultantConfigsById]);
 
     const consultantConfigsForCommandCenter = useMemo(() => {
-        return Object.entries(consultantConfigsState).map(([consultantId, cfg]) => ({
-            consultantId: Number(consultantId),
-            maxCapacity: Number(cfg.maxCapacity ?? 40),
-            billableCapacity: Number(cfg.billableCapacity ?? 40),
-            notes: String(cfg.notes ?? ""),
-        }));
+        return buildConsultantConfigRows(consultantConfigsState);
     }, [consultantConfigsState]);
 
     const previousConsultantConfigsForCommandCenter = useMemo(() => {
@@ -951,29 +1058,115 @@ export function DashboardClient({
         previousConsultantConfigs: previousConsultantConfigsForCommandCenter,
     }), [dashboardConfigState, capacityGridState, consultantConfigsForCommandCenter, previousConsultantConfigsForCommandCenter, taskBillableRollupsState, taskPlannedRollupsState]);
 
+    const currentConsultantConfigRecords = useMemo(
+        () => Array.isArray(dashboardConfigState?.consultantConfigs) ? dashboardConfigState.consultantConfigs : [],
+        [dashboardConfigState?.consultantConfigs]
+    );
+
+    useEffect(() => {
+        const currentSnapshot: DashboardWeekSnapshot = {
+            weekConfig: mergedDbConfig?.weekConfig,
+            leadConfigs: mergedDbConfig?.leadConfigs,
+            clientConfigs: mergedDbConfig?.clientConfigs,
+            clientDirectory: mergedDbConfig?.clientDirectory,
+            consultantConfigs: currentConsultantConfigRecords,
+            previousLeadConfigs: mergedDbConfig?.previousLeadConfigs,
+            previousClientConfigs: mergedDbConfig?.previousClientConfigs,
+            previousConsultantConfigs: mergedDbConfig?.previousConsultantConfigs,
+            capacityGridConfig: capacityGridState,
+            taskPlannedRollups: taskPlannedRollupsState,
+            taskBillableRollups: taskBillableRollupsState,
+            previousTaskBillableRollups: mergedDbConfig?.previousTaskBillableRollups ?? [],
+        };
+        weekSnapshotCacheRef.current.set(getWeekCacheKey(activeWeekStrState), currentSnapshot);
+    }, [
+        activeWeekStrState,
+        capacityGridState,
+        consultantConfigsForCommandCenter,
+        currentConsultantConfigRecords,
+        getWeekCacheKey,
+        mergedDbConfig,
+        taskBillableRollupsState,
+        taskPlannedRollupsState,
+    ]);
+
+    const handleCapacityGridReplace = useCallback((nextGrid: CapacityGridPayload) => {
+        setCapacityGridState(nextGrid);
+        setDashboardConfigState((prev: any) => ({
+            ...prev,
+            capacityGridConfig: nextGrid,
+            capacityGridConfigsForYear: upsertCapacityGridWeekRecord(
+                Array.isArray(prev?.capacityGridConfigsForYear) ? prev.capacityGridConfigsForYear : [],
+                activeWeekStrState,
+                nextGrid
+            ),
+        }));
+    }, [activeWeekStrState]);
+
     const handleConsultantConfigChange = (
         consultantId: number,
         patch: Partial<{ maxCapacity: number; billableCapacity: number; notes: string }>
     ) => {
-        setConsultantConfigsState((prev) => ({
-            ...prev,
-            [consultantId]: {
-                ...(prev[consultantId] || { maxCapacity: 40, billableCapacity: 40, notes: "" }),
-                ...patch,
-            },
-        }));
+        setConsultantConfigsState((prev) => {
+            const nextConfigs = {
+                ...prev,
+                [consultantId]: {
+                    ...(prev[consultantId] || { maxCapacity: 40, billableCapacity: 40, notes: "" }),
+                    ...patch,
+                },
+            };
+            setDashboardConfigState((current: any) => ({
+                ...current,
+                consultantConfigs: buildConsultantConfigRecords(
+                    Array.isArray(current?.consultantConfigs) ? current.consultantConfigs : [],
+                    activeWeekStrState,
+                    nextConfigs
+                ),
+                consultantConfigsForYear: upsertConsultantConfigsForYear(
+                    Array.isArray(current?.consultantConfigsForYear) ? current.consultantConfigsForYear : [],
+                    activeWeekStrState,
+                    nextConfigs
+                ),
+            }));
+            return nextConfigs;
+        });
     };
 
     const handleConsultantConfigReplace = useCallback((nextConfigs: Record<number, { maxCapacity: number; billableCapacity: number; notes: string }>) => {
         setConsultantConfigsState(nextConfigs);
-    }, []);
+        setDashboardConfigState((prev: any) => ({
+            ...prev,
+            consultantConfigs: buildConsultantConfigRecords(
+                Array.isArray(prev?.consultantConfigs) ? prev.consultantConfigs : [],
+                activeWeekStrState,
+                nextConfigs
+            ),
+            consultantConfigsForYear: upsertConsultantConfigsForYear(
+                Array.isArray(prev?.consultantConfigsForYear) ? prev.consultantConfigsForYear : [],
+                activeWeekStrState,
+                nextConfigs
+            ),
+        }));
+    }, [activeWeekStrState]);
 
     const handleClientDirectoryReplace = useCallback((nextClients: ClientDirectoryRecord[]) => {
+        const nextGrid = syncCapacityGridWithClientDirectory(capacityGridState, nextClients);
+        setCapacityGridState(nextGrid);
         setDashboardConfigState((prev: any) => ({
             ...prev,
             clientDirectory: nextClients,
+            clientConfigs: syncClientConfigsWithDirectory(
+                Array.isArray(prev?.clientConfigs) ? prev.clientConfigs : [],
+                nextClients
+            ),
+            capacityGridConfig: nextGrid,
+            capacityGridConfigsForYear: upsertCapacityGridWeekRecord(
+                Array.isArray(prev?.capacityGridConfigsForYear) ? prev.capacityGridConfigsForYear : [],
+                activeWeekStrState,
+                nextGrid
+            ),
         }));
-    }, []);
+    }, [activeWeekStrState, capacityGridState]);
 
     return (
         <div className="flex h-screen w-full bg-background overflow-hidden text-sm selection:bg-primary/30 selection:text-white">
@@ -1087,7 +1280,7 @@ export function DashboardClient({
                             <CapacityGrid
                                 activeWeekStr={activeWeekStrState}
                                 initialGrid={capacityGridState}
-                                onGridChange={setCapacityGridState}
+                                onGridChange={handleCapacityGridReplace}
                                 consultants={consultantsForRoster}
                                 consultantConfigsById={consultantConfigsState}
                                 clientDirectory={Array.isArray(dashboardConfigState?.clientDirectory) ? dashboardConfigState.clientDirectory : []}
@@ -1123,7 +1316,7 @@ export function DashboardClient({
                                 capacityGrid={capacityGridState}
                                 onConsultantConfigChange={handleConsultantConfigChange}
                                 onConsultantConfigReplace={handleConsultantConfigReplace}
-                                onCapacityGridChange={setCapacityGridState}
+                                onCapacityGridChange={handleCapacityGridReplace}
                                 onNavigateWeek={handleWeekChange}
                                 isWeekLoading={isWeekLoading}
                             />

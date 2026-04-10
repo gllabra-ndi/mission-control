@@ -17,6 +17,7 @@ import {
 } from "@/app/actions";
 import { ImportedTask } from "@/lib/imported-data";
 import { buildEditableTaskSeedFromImportedTask, isEditableTaskVisibleInWeek } from "@/lib/editableTaskLifecycle";
+import { normalizeDashboardName } from "@/lib/dashboardMetrics";
 import { cn } from "@/lib/utils";
 import type { FolderWithLists } from "@/components/Sidebar";
 
@@ -61,16 +62,13 @@ type TimesheetCellNoteEditorState = {
 type ClientGroup = {
     clientId: string;
     clientLabel: string;
-    plannedHours: number;
+    plannedTaskHours: number;
+    clientPlanHours: number;
     actualsHours: number;
-    remainingHours: number;
+    remainingTaskHours: number;
     actualsByDate: Record<string, number>;
     tasks: TimesheetTaskRow[];
 };
-
-function normalizeName(value: string) {
-    return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
 
 function formatInputHours(value: number) {
     if (!Number.isFinite(value) || Math.abs(value) < 0.001) return "";
@@ -206,7 +204,7 @@ export function Timesheets({
             const id = String(client?.id ?? "").trim();
             const name = String(client?.name ?? "").trim();
             if (id) byId.set(id, client);
-            if (name) byName.set(normalizeName(name), client);
+            if (name) byName.set(normalizeDashboardName(name), client);
         });
         return { byId, byName };
     }, [clientDirectory]);
@@ -221,29 +219,34 @@ export function Timesheets({
                 const listId = String(list.id ?? "").trim();
                 const listName = String(list.name ?? "").trim();
                 if (clientId && listId) byListId.set(listId, { clientId, clientName });
-                if (clientName && listName) byListName.set(normalizeName(listName), { clientId: clientId || clientName, clientName });
+                if (clientName && listName) byListName.set(normalizeDashboardName(listName), { clientId: clientId || clientName, clientName });
             });
         });
         return { byListId, byListName };
     }, [folders]);
 
+    const weekDateKeys = useMemo(() => new Set(weekdays.map((weekday) => weekday.key)), [weekdays]);
+
     const visibleTasks = useMemo(() => {
-        const selectedKey = normalizeName(selectedConsultant);
+        const selectedKey = normalizeDashboardName(selectedConsultant);
         return editableTasks
-            .filter((task) => normalizeName(task.assignee) === selectedKey)
-            .filter((task) => task.status === "open")
+            .filter((task) => normalizeDashboardName(task.assignee) === selectedKey)
+            .filter((task) => {
+                const hasWeekActuals = (task.billableEntries || []).some((entry) => weekDateKeys.has(String(entry.entryDate ?? "")));
+                return task.status === "open" || hasWeekActuals;
+            })
             .sort((a, b) => a.subject.localeCompare(b.subject));
-    }, [editableTasks, selectedConsultant]);
+    }, [editableTasks, selectedConsultant, weekDateKeys]);
 
     const capacityRows = useMemo(
         () => Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [],
         [capacityGrid]
     );
 
-    const plannedHoursByClient = useMemo(() => {
-        const selectedKey = normalizeName(selectedConsultant);
+    const clientPlanHoursByClient = useMemo(() => {
+        const selectedKey = normalizeDashboardName(selectedConsultant);
         const resources = Array.isArray(capacityGrid?.resources) ? capacityGrid.resources : [];
-        const matchedResource = resources.find((resource) => normalizeName(String(resource?.name ?? "")) === selectedKey);
+        const matchedResource = resources.find((resource) => normalizeDashboardName(String(resource?.name ?? "")) === selectedKey);
         if (!matchedResource) return new Map<string, number>();
 
         const nextMap = new Map<string, number>();
@@ -254,7 +257,7 @@ export function Timesheets({
             if (hours <= 0) return;
             if (clientId) nextMap.set(clientId, Number(((nextMap.get(clientId) ?? 0) + hours).toFixed(1)));
             if (clientLabel) {
-                const fallbackKey = `name:${normalizeName(clientLabel)}`;
+                const fallbackKey = `name:${normalizeDashboardName(clientLabel)}`;
                 nextMap.set(fallbackKey, Number(((nextMap.get(fallbackKey) ?? 0) + hours).toFixed(1)));
             }
         });
@@ -267,7 +270,7 @@ export function Timesheets({
             const scopeId = String(editableTask?.scopeId ?? "").trim();
 
             if (scopeType === "list" && scopeId) {
-                const boardMatch = boardClientByScope.byListId.get(scopeId) ?? boardClientByScope.byListName.get(normalizeName(scopeId));
+                const boardMatch = boardClientByScope.byListId.get(scopeId) ?? boardClientByScope.byListName.get(normalizeDashboardName(scopeId));
                 if (boardMatch) {
                     const canonicalClient = clientDirectoryLookup.byId.get(boardMatch.clientId);
                     return {
@@ -279,7 +282,7 @@ export function Timesheets({
 
             if (scopeType === "folder" && scopeId) {
                 const folderName = getFolderNameById(folders, scopeId) || scopeId;
-                const directoryMatch = clientDirectoryLookup.byId.get(normalizeName(scopeId)) ?? clientDirectoryLookup.byName.get(normalizeName(folderName));
+                const directoryMatch = clientDirectoryLookup.byId.get(normalizeDashboardName(scopeId)) ?? clientDirectoryLookup.byName.get(normalizeDashboardName(folderName));
                 if (directoryMatch) {
                     return {
                         clientId: directoryMatch.id,
@@ -287,7 +290,7 @@ export function Timesheets({
                     };
                 }
                 return {
-                    clientId: `name:${normalizeName(folderName) || "unassigned-client"}`,
+                    clientId: `name:${normalizeDashboardName(folderName) || "unassigned-client"}`,
                     clientLabel: folderName || "Unassigned Client",
                 };
             }
@@ -304,7 +307,7 @@ export function Timesheets({
 
             const candidates = getTaskScopeCandidates(sourceTask);
             for (const candidate of candidates) {
-                const normalized = normalizeName(candidate);
+                const normalized = normalizeDashboardName(candidate);
                 const boardMatch = boardClientByScope.byListName.get(normalized);
                 if (boardMatch) {
                     const canonicalClient = clientDirectoryLookup.byId.get(boardMatch.clientId);
@@ -329,7 +332,7 @@ export function Timesheets({
                     : "";
             const firstLabel = fallbackScopeLabel || candidates[1] || candidates[2] || candidates[3] || "Unassigned Client";
             return {
-                clientId: `name:${normalizeName(firstLabel) || "unassigned-client"}`,
+                clientId: `name:${normalizeDashboardName(firstLabel) || "unassigned-client"}`,
                 clientLabel: firstLabel,
             };
         };
@@ -395,17 +398,18 @@ export function Timesheets({
         const groups = new Map<string, ClientGroup>();
 
         taskRows.forEach((row) => {
-            const plannedHours = Number(
-                plannedHoursByClient.get(row.clientId)
-                ?? plannedHoursByClient.get(`name:${normalizeName(row.clientLabel)}`)
+            const clientPlanHours = Number(
+                clientPlanHoursByClient.get(row.clientId)
+                ?? clientPlanHoursByClient.get(`name:${normalizeDashboardName(row.clientLabel)}`)
                 ?? 0
             );
             const existing = groups.get(row.clientId) ?? {
                 clientId: row.clientId,
                 clientLabel: row.clientLabel,
-                plannedHours,
+                plannedTaskHours: 0,
+                clientPlanHours,
                 actualsHours: 0,
-                remainingHours: 0,
+                remainingTaskHours: 0,
                 actualsByDate: weekdays.reduce<Record<string, number>>((acc, weekday) => {
                     acc[weekday.key] = 0;
                     return acc;
@@ -413,6 +417,7 @@ export function Timesheets({
                 tasks: [],
             };
 
+            existing.plannedTaskHours += Number(row.task.estimateHours ?? 0);
             existing.actualsHours += row.totalActuals;
             weekdays.forEach((weekday) => {
                 existing.actualsByDate[weekday.key] = Number(
@@ -426,15 +431,16 @@ export function Timesheets({
         return Array.from(groups.values())
             .map((group) => ({
                 ...group,
+                plannedTaskHours: Number(group.plannedTaskHours.toFixed(2)),
                 actualsHours: Number(group.actualsHours.toFixed(2)),
-                remainingHours: Number(Math.max(0, group.plannedHours - group.actualsHours).toFixed(2)),
+                remainingTaskHours: Number(Math.max(0, group.plannedTaskHours - group.actualsHours).toFixed(2)),
                 tasks: group.tasks.sort((a, b) => a.task.subject.localeCompare(b.task.subject)),
             }))
             .sort((a, b) => a.clientLabel.localeCompare(b.clientLabel));
-    }, [plannedHoursByClient, taskRows, weekdays]);
+    }, [clientPlanHoursByClient, taskRows, weekdays]);
 
     const overallSummary = useMemo(() => {
-        const plannedHours = clientGroups.reduce((sum, group) => sum + Number(group.plannedHours ?? 0), 0);
+        const plannedHours = clientGroups.reduce((sum, group) => sum + Number(group.plannedTaskHours ?? 0), 0);
         const actualsHours = clientGroups.reduce((sum, group) => sum + Number(group.actualsHours ?? 0), 0);
         return {
             plannedHours: Number(plannedHours.toFixed(1)),
@@ -465,15 +471,15 @@ export function Timesheets({
             .map((weekday) => Number(group.actualsByDate[weekday.key] ?? 0))
             .filter((hours) => hours > 0.05);
         const emptyDayCount = weekdays.filter((weekday) => Number(group.actualsByDate[weekday.key] ?? 0) <= 0.05).length;
-        if (group.remainingHours <= 0.05) return 0;
+        if (group.remainingTaskHours <= 0.05) return 0;
 
         if (populatedDayValues.length > 0) {
             const average = populatedDayValues.reduce((sum, hours) => sum + hours, 0) / populatedDayValues.length;
-            const evenSpread = group.remainingHours / Math.max(1, emptyDayCount);
-            return Number(Math.min(group.remainingHours, average, evenSpread).toFixed(1));
+            const evenSpread = group.remainingTaskHours / Math.max(1, emptyDayCount);
+            return Number(Math.min(group.remainingTaskHours, average, evenSpread).toFixed(1));
         }
 
-        return Number((group.remainingHours / Math.max(1, emptyDayCount)).toFixed(1));
+        return Number((group.remainingTaskHours / Math.max(1, emptyDayCount)).toFixed(1));
     };
 
     const applySuggestedHours = (taskId: string, dateKey: string, suggestedHours: number) => {
@@ -656,14 +662,14 @@ export function Timesheets({
                         </select>
                     </label>
                     <span className="rounded-full border border-border/50 bg-surface/20 px-3 py-1 text-[11px] text-text-muted">
-                        {isWeekLoading ? "Loading..." : isLoading ? "Loading tasks..." : isPending ? "Saving..." : `${taskRows.length} active tasks · ${overallSummary.remainingHours.toFixed(1)}h remaining`}
+                        {isWeekLoading ? "Loading..." : isLoading ? "Loading tasks..." : isPending ? "Saving..." : `${taskRows.length} tasks · ${overallSummary.remainingHours.toFixed(1)}h remaining`}
                     </span>
                 </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Client Plan This Week</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Planned Task Hours</div>
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.plannedHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
@@ -671,20 +677,20 @@ export function Timesheets({
                     <div className="mt-2 text-4xl font-bold text-white">{overallSummary.actualsHours.toFixed(1)}</div>
                 </div>
                 <div className="rounded-[24px] border border-primary/30 bg-[linear-gradient(180deg,rgba(29,39,69,0.98)_0%,rgba(16,24,44,0.98)_100%)] px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining Client Plan</div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">Remaining Task Hours</div>
                     <div className="mt-2 text-5xl font-bold text-white">{overallSummary.remainingHours.toFixed(1)}</div>
                     <div className="mt-2 text-xs text-text-muted">Grouped by client, with Monday through Friday entry cells per task.</div>
                 </div>
             </div>
 
             <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-5 py-4 text-xs text-text-muted shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-                This grid uses the weekly client plan from Plan vs Actuals as the target, groups local editable tasks under their canonical client, and suggests weekday entries from each client&apos;s current actual pattern.
+                This grid uses local editable task estimates as the weekly task target, keeps client-plan visibility beside each group, and suggests weekday entries from each client&apos;s current actual pattern.
             </div>
 
             {clientGroups.length === 0 && (
                 <div className="rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(18,23,36,0.94)_0%,rgba(12,16,24,0.98)_100%)] px-6 py-12 text-center text-sm text-text-muted shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
                     {selectedConsultant
-                        ? `No active timesheet tasks found for ${selectedConsultant} in this week.`
+                        ? `No timesheet tasks found for ${selectedConsultant} in this week.`
                         : "Select a consultant to view timesheets."}
                 </div>
             )}
@@ -699,20 +705,24 @@ export function Timesheets({
                             <div className="flex items-center justify-between gap-4 flex-wrap">
                                 <div>
                                     <div className="text-lg font-semibold text-white">{group.clientLabel}</div>
-                                    <div className="mt-1 text-xs text-text-muted">{group.tasks.length} active task{group.tasks.length === 1 ? "" : "s"} for {selectedConsultant || "this consultant"}</div>
+                                    <div className="mt-1 text-xs text-text-muted">{group.tasks.length} task{group.tasks.length === 1 ? "" : "s"} for {selectedConsultant || "this consultant"}</div>
                                 </div>
                                 <div className="flex items-center gap-3 flex-wrap">
                                         <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
-                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Client Plan</div>
-                                        <div className="mt-1 text-xl font-semibold text-white">{group.plannedHours.toFixed(1)}</div>
+                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Task Plan</div>
+                                        <div className="mt-1 text-xl font-semibold text-white">{group.plannedTaskHours.toFixed(1)}</div>
                                     </div>
                                     <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
                                         <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Actuals</div>
                                         <div className="mt-1 text-xl font-semibold text-white">{group.actualsHours.toFixed(1)}</div>
                                     </div>
+                                    <div className="rounded-xl border border-border/50 bg-background/30 px-4 py-2">
+                                        <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Client Plan</div>
+                                        <div className="mt-1 text-xl font-semibold text-white">{group.clientPlanHours.toFixed(1)}</div>
+                                    </div>
                                     <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-2">
                                         <div className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Remaining</div>
-                                        <div className="mt-1 text-2xl font-semibold text-white">{group.remainingHours.toFixed(1)}</div>
+                                        <div className="mt-1 text-2xl font-semibold text-white">{group.remainingTaskHours.toFixed(1)}</div>
                                     </div>
                                 </div>
                             </div>
@@ -729,6 +739,7 @@ export function Timesheets({
                                                 <div className="mt-1 text-[10px] text-text-muted">{weekday.dateLabel}</div>
                                             </th>
                                         ))}
+                                        <th className="px-3 py-3 text-right min-w-[110px]">Planned</th>
                                         <th className="px-3 py-3 text-right min-w-[110px]">Actuals</th>
                                         <th className="px-3 py-3 text-center min-w-[110px]">Save</th>
                                     </tr>
@@ -788,6 +799,9 @@ export function Timesheets({
                                                         </td>
                                                     );
                                                 })}
+                                                <td className="px-3 py-3 text-right align-middle">
+                                                    <div className="text-base font-semibold text-white">{Number(row.task.estimateHours ?? 0).toFixed(1)}</div>
+                                                </td>
                                                 <td className="px-3 py-3 text-right align-middle">
                                                     <div className="text-base font-semibold text-white">{row.totalActuals.toFixed(1)}</div>
                                                 </td>

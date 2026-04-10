@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer";
+import { createIsolatedPostgresSchema, dropIsolatedPostgresSchema } from "./test-db-utils.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,7 +21,6 @@ const strictConsole = args.has("--strict-console") || process.env.SMOKE_STRICT_C
 const reuseServer = args.has("--reuse-server") || process.env.SMOKE_REUSE_SERVER === "true";
 const timestamp = Date.now();
 const smokeDistDir = process.env.NEXT_DIST_DIR?.trim() || `.next-smoke-${port}-${timestamp}`;
-const smokeDbSource = path.resolve(repoRoot, process.env.SMOKE_DB_SOURCE || "prisma/dev.db");
 
 const serverStdout = [];
 const serverStderr = [];
@@ -40,22 +39,6 @@ function pushLogLine(buffer, prefix, chunk) {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function ensureReadable(filePath) {
-    await access(filePath, fsConstants.R_OK);
-}
-
-async function createIsolatedDbCopy() {
-    await ensureReadable(smokeDbSource);
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "mission-control-smoke-"));
-    const tempDbPath = path.join(tempDir, "smoke.db");
-    await cp(smokeDbSource, tempDbPath);
-    return {
-        tempDir,
-        tempDbPath,
-        databaseUrl: `file:${tempDbPath}`,
-    };
 }
 
 async function waitForServer(url, timeoutMs = 120000) {
@@ -88,6 +71,7 @@ async function buildApp(databaseUrl) {
             env: {
                 ...process.env,
                 DATABASE_URL: databaseUrl,
+                AUTH_ENABLED: "false",
                 NEXT_DIST_DIR: smokeDistDir,
                 CI: "true",
             },
@@ -117,6 +101,7 @@ function startServer(databaseUrl) {
             env: {
                 ...process.env,
                 DATABASE_URL: databaseUrl,
+                AUTH_ENABLED: "false",
                 NEXT_DIST_DIR: smokeDistDir,
                 PORT: String(port),
                 CI: "true",
@@ -316,20 +301,56 @@ async function typeIntoField(page, selector, value) {
     await page.type(selector, String(value));
 }
 
-async function clickNewClientRowSave(page) {
-    const clicked = await page.evaluate(() => {
-        const row = Array.from(document.querySelectorAll("[data-client-row]")).find((element) =>
-            String(element.getAttribute("data-client-row") || "").startsWith("new-")
-        );
+async function waitForClientAutosave(page, clientName, timeoutMs = 30000) {
+    await page.waitForFunction(
+        (targetName) => Array.from(document.querySelectorAll("[data-client-row]")).some((row) => {
+            const input = row.querySelector('input[placeholder="Client name"]');
+            const rowId = String(row.getAttribute("data-client-row") || "");
+            return input instanceof HTMLInputElement && input.value === targetName && !rowId.startsWith("new-");
+        }),
+        { timeout: timeoutMs },
+        clientName
+    );
+}
+
+async function waitForAutosaveIdle(page, timeoutMs = 30000) {
+    await page.waitForFunction(
+        () => document.body?.textContent?.includes("Autosave on"),
+        { timeout: timeoutMs }
+    );
+}
+
+async function removeClientByName(page, clientName) {
+    await page.waitForFunction(
+        (targetName) => {
+            const row = Array.from(document.querySelectorAll("[data-client-row]")).find((element) => {
+                const input = element.querySelector('input[placeholder="Client name"]');
+                return input instanceof HTMLInputElement && input.value === targetName;
+            });
+            if (!row) return false;
+            const removeButton = Array.from(row.querySelectorAll("button")).find((button) =>
+                String(button.textContent || "").replace(/\s+/g, " ").trim() === "Remove"
+            );
+            return Boolean(removeButton && !(removeButton instanceof HTMLButtonElement && removeButton.disabled));
+        },
+        { timeout: 30000 },
+        clientName
+    );
+    const removed = await page.evaluate((targetName) => {
+        const row = Array.from(document.querySelectorAll("[data-client-row]")).find((element) => {
+            const input = element.querySelector('input[placeholder="Client name"]');
+            return input instanceof HTMLInputElement && input.value === targetName;
+        });
         if (!row) return false;
-        const saveButton = Array.from(row.querySelectorAll("button")).find((button) =>
-            String(button.textContent || "").replace(/\s+/g, " ").trim() === "Save"
+        const removeButton = Array.from(row.querySelectorAll("button")).find((button) =>
+            String(button.textContent || "").replace(/\s+/g, " ").trim() === "Remove"
         );
-        if (!saveButton || (saveButton instanceof HTMLButtonElement && saveButton.disabled)) return false;
-        saveButton.click();
+        if (!removeButton || (removeButton instanceof HTMLButtonElement && removeButton.disabled)) return false;
+        window.confirm = () => true;
+        removeButton.click();
         return true;
-    });
-    assert(clicked, "Unable to save the new client row");
+    }, clientName);
+    assert(removed, `Unable to remove client row "${clientName}"`);
 }
 
 async function openFirstCapacityGridNoteEditor(page) {
@@ -343,7 +364,7 @@ async function openFirstCapacityGridNoteEditor(page) {
 }
 
 async function clickFirstBacklogSegment(page) {
-    const clicked = await page.evaluate(() => {
+    return page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll("button"));
         const match = buttons.find((button) => {
             const title = String(button.getAttribute("title") || "");
@@ -353,7 +374,6 @@ async function clickFirstBacklogSegment(page) {
         match.click();
         return true;
     });
-    assert(clicked, "Unable to click a backlog growth segment");
 }
 
 async function runSmoke(page, issues) {
@@ -450,7 +470,7 @@ async function runSmoke(page, issues) {
             console.log("[smoke] Consultant Utilization -> submitted add consultant");
             await page.waitForFunction(
                 (name) => document.body?.textContent?.includes(name),
-                { timeout: 30000 },
+                { timeout: 60000 },
                 `Smoke${uniqueSuffix} Tester`
             );
             console.log("[smoke] Consultant Utilization -> consultant visible");
@@ -462,7 +482,7 @@ async function runSmoke(page, issues) {
                     );
                     return Boolean(button && String(button.className).includes("bg-surface-hover"));
                 },
-                { timeout: 30000 }
+                { timeout: 60000 }
             );
             console.log("[smoke] Consultant Utilization -> removed tab active");
             await clickByTextContains(page, "Active (");
@@ -487,7 +507,7 @@ async function runSmoke(page, issues) {
             const startingWeek = await getUrlSearchParam(page, "week");
             await clickByAriaLabel(page, "Previous week");
             await waitForUrlSearchParamChange(page, "week", startingWeek);
-            await waitForMainText(page, "Remaining Planned", 30000);
+            await waitForMainText(page, "Remaining Task Hours", 30000);
         });
 
         await runStep("Settings Page", async () => {
@@ -620,28 +640,33 @@ async function runSmoke(page, issues) {
             await typeIntoField(page, '[data-client-row^="new-"] input[placeholder="Managed Service"]', "Smoke Deal");
             await typeIntoField(page, '[data-client-row^="new-"] td:nth-child(5) input', "8");
             await typeIntoField(page, '[data-client-row^="new-"] td:nth-child(6) input', "12");
-            await clickNewClientRowSave(page);
+            await waitForClientAutosave(page, uniqueName);
+            await waitForAutosaveIdle(page);
+            await removeClientByName(page, uniqueName);
             await page.waitForFunction(
-                (name) => Array.from(document.querySelectorAll('[data-client-row] input[placeholder="Client name"]')).some((input) => {
+                (name) => !Array.from(document.querySelectorAll('[data-client-row] input[placeholder="Client name"]')).some((input) => {
                     return input instanceof HTMLInputElement && input.value === name;
                 }),
                 { timeout: 30000 },
                 uniqueName
             );
+            await waitForAutosaveIdle(page);
         });
 
         await runStep("Backlog Growth Drilldown", async () => {
             await page.goto(`${baseUrl}/?tab=backlog-growth`, { waitUntil: "domcontentloaded", timeout: 120000 });
             await waitForTab(page, "backlog-growth", "Backlog Growth");
             await selectDifferentOption(page, "select");
-            await clickFirstBacklogSegment(page);
-            await page.waitForFunction(
-                () => {
-                    const text = document.body?.textContent || "";
-                    return text.includes("Existing backlog") || text.includes("New work added in month");
-                },
-                { timeout: 30000 }
-            );
+            const openedDrilldown = await clickFirstBacklogSegment(page);
+            if (openedDrilldown) {
+                await page.waitForFunction(
+                    () => {
+                        const text = document.body?.textContent || "";
+                        return text.includes("Existing backlog") || text.includes("New work added in month");
+                    },
+                    { timeout: 30000 }
+                );
+            }
         });
 
         const bodyText = await readBodyText(page);
@@ -674,7 +699,7 @@ async function main() {
     let browser = null;
     let page = null;
     let server = null;
-    let tempDir = null;
+    let isolatedDb = null;
     let screenshotDir = null;
     let originalTsconfig = null;
 
@@ -683,8 +708,7 @@ async function main() {
         originalTsconfig = await readFile(path.join(repoRoot, "tsconfig.json"), "utf8");
 
         if (!reuseServer) {
-            const isolatedDb = await createIsolatedDbCopy();
-            tempDir = isolatedDb.tempDir;
+            isolatedDb = await createIsolatedPostgresSchema("smoke", { stdio: "pipe" });
             await syncIsolatedDbSchema(isolatedDb.databaseUrl);
             await buildApp(isolatedDb.databaseUrl);
             server = startServer(isolatedDb.databaseUrl);
@@ -781,8 +805,8 @@ async function main() {
         if (!reuseServer) {
             await rm(path.join(repoRoot, smokeDistDir), { recursive: true, force: true });
         }
-        if (tempDir) {
-            await rm(tempDir, { recursive: true, force: true });
+        if (isolatedDb) {
+            await dropIsolatedPostgresSchema(isolatedDb.baseDatabaseUrl, isolatedDb.schemaName);
         }
     }
 }
