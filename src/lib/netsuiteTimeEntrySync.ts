@@ -7,6 +7,7 @@ import {
     type NetSuiteCreateTimeEntryInput,
     type NetSuiteUpdateTimeEntryInput,
 } from "@/lib/netsuite";
+import { getDefaultNetSuiteMappingForClientDirectoryName } from "@/lib/netsuiteClientMappingDefaults";
 
 // ---------------------------------------------------------------------------
 // Kill switch
@@ -92,12 +93,20 @@ async function resolveNetSuiteProjectId(clientId: string): Promise<number | null
     try {
         const client = await clientModel.findUnique({
             where: { id: clientId },
-            select: { netsuiteProjectId: true },
+            select: { netsuiteProjectId: true, name: true },
         });
         const raw = String(client?.netsuiteProjectId || "").trim();
-        if (!raw) return null;
-        const parsed = Number(raw);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+        const fromDb = (value: string) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+        };
+        if (raw) {
+            return fromDb(raw);
+        }
+        const fallback = getDefaultNetSuiteMappingForClientDirectoryName(String(client?.name || ""));
+        const fallbackRaw = String(fallback?.netsuiteProjectId || "").trim();
+        if (!fallbackRaw) return null;
+        return fromDb(fallbackRaw);
     } catch {
         return null;
     }

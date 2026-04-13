@@ -21,6 +21,7 @@ import {
     normalizeWeekKey,
 } from "@/lib/editableTaskLifecycle";
 import { syncTimeEntryToNetSuite } from "@/lib/netsuiteTimeEntrySync";
+import { getDefaultNetSuiteMappingForClientDirectoryName } from "@/lib/netsuiteClientMappingDefaults";
 import {
     normalizeAllocationSource,
     normalizeSidebarSource,
@@ -654,6 +655,7 @@ async function ensureClientDirectorySeeded() {
     });
 
     for (const client of Array.from(missing.values())) {
+        const nsDefault = getDefaultNetSuiteMappingForClientDirectoryName(client.name);
         await clientDirectoryModel.create({
             data: {
                 id: client.id,
@@ -663,6 +665,8 @@ async function ensureClientDirectorySeeded() {
                 dealType: client.dealType,
                 min: client.min,
                 max: client.max,
+                netsuiteProjectId: nsDefault?.netsuiteProjectId?.trim() || null,
+                netsuiteProjectName: nsDefault?.netsuiteProjectName?.trim() || null,
                 isActive: client.isActive,
                 isInternal: client.isInternal,
                 sortOrder: client.sortOrder,
@@ -703,16 +707,68 @@ async function ensureClientDirectorySeeded() {
     }
 }
 
+async function persistNetSuiteMappingDefaultsForClientDirectoryRows(rows: any[]): Promise<any[]> {
+    const clientDirectoryModel = (prisma as any).clientDirectory;
+    if (!clientDirectoryModel || !Array.isArray(rows) || rows.length === 0) {
+        return rows;
+    }
+
+    const updates: { id: string; netsuiteProjectId: string; netsuiteProjectName: string }[] = [];
+    for (const row of rows) {
+        const id = String(row?.id ?? "").trim();
+        const name = String(row?.name ?? "").trim();
+        const existingId = String(row?.netsuiteProjectId ?? "").trim();
+        if (!id || existingId) continue;
+
+        const def = getDefaultNetSuiteMappingForClientDirectoryName(name);
+        const nextId = String(def?.netsuiteProjectId ?? "").trim();
+        const nextName = String(def?.netsuiteProjectName ?? "").trim();
+        if (!def || !nextId) continue;
+
+        updates.push({
+            id,
+            netsuiteProjectId: nextId,
+            netsuiteProjectName: nextName,
+        });
+    }
+
+    if (updates.length === 0) {
+        return rows;
+    }
+
+    await prisma.$transaction(
+        updates.map((u) => clientDirectoryModel.update({
+            where: { id: u.id },
+            data: {
+                netsuiteProjectId: u.netsuiteProjectId,
+                netsuiteProjectName: u.netsuiteProjectName,
+            },
+        }))
+    );
+
+    const byId = new Map(updates.map((u) => [u.id, u] as const));
+    return rows.map((row) => {
+        const u = byId.get(String(row?.id ?? "").trim());
+        if (!u) return row;
+        return {
+            ...row,
+            netsuiteProjectId: u.netsuiteProjectId,
+            netsuiteProjectName: u.netsuiteProjectName,
+        };
+    });
+}
+
 async function loadClientDirectoryRecords(): Promise<ClientDirectoryRecord[]> {
     const clientDirectoryModel = (prisma as any).clientDirectory;
     if (!clientDirectoryModel) return [] as ClientDirectoryRecord[];
     await ensureClientDirectorySeeded();
-    const rows = await clientDirectoryModel.findMany({
+    let rows = await clientDirectoryModel.findMany({
         orderBy: [
             { sortOrder: "asc" },
             { name: "asc" },
         ],
     });
+    rows = await persistNetSuiteMappingDefaultsForClientDirectoryRows(rows);
     return sortClientDirectoryRecords(rows.map(mapClientDirectory));
 }
 
