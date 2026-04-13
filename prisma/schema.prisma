@@ -125,6 +125,8 @@ model EditableTask {
   description  String   @default("")
   assignee     String   @default("")
   isAi         Boolean  @default(false)
+  /// When true, time entries default to billable in NetSuite unless marked value-add on the entry.
+  isBillable   Boolean  @default(true)
   estimateHours Float   @default(0)
   billableHoursToday Float @default(0)
   status       String   @default("backlog")

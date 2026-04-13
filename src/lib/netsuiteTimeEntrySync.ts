@@ -290,7 +290,8 @@ export async function syncTimeEntryToNetSuite(
         const hours = Number(entry.hours ?? 0);
         const entryDate = String(entry.entryDate || "");
         const memo = String(entry.note || "");
-        const isBillable = !Boolean(entry.isValueAdd);
+        const taskAllowsBillable = task.isBillable === undefined ? true : Boolean(task.isBillable);
+        const isBillable = taskAllowsBillable && !Boolean(entry.isValueAdd);
         const externalId = String(entry.id);
 
         if (mode === "create") {

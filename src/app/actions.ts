@@ -228,6 +228,8 @@ export interface EditableTaskRecord {
     description: string;
     assignee: string;
     isAi: boolean;
+    /** Drives NetSuite "billable" for time entries unless the entry is marked value-add. */
+    isBillable: boolean;
     estimateHours: number;
     billableHoursToday: number;
     status: "backlog" | "open" | "closed";
@@ -279,6 +281,11 @@ export interface EditableTaskPlannedRollupRecord {
 }
 
 const DASHBOARD_BASE_CONFIG_WEEK = "2026-03-02";
+
+/** New tasks default to billable; users can turn this off per task. */
+function defaultIsBillableForEditableScope(_scopeType: string): boolean {
+    return true;
+}
 
 function mergeDashboardClientConfigs(baseRows: any[], weekRows: any[]) {
     const baseById = new Map<string, any>();
@@ -828,6 +835,7 @@ function mapEditableTask(row: any, activeWeek?: string): EditableTaskRecord {
         description: String(row.description ?? ""),
         assignee: String(row.assignee ?? ""),
         isAi: Boolean(row.isAi ?? false),
+        isBillable: row.isBillable === undefined ? true : Boolean(row.isBillable),
         estimateHours: Number(row.estimateHours ?? 0),
         billableHoursToday: Number(row.billableHoursToday ?? 0),
         status: getEffectiveEditableTaskStatus(row, activeWeek),
@@ -3007,6 +3015,7 @@ export async function getEditableTasks(
                 description: String(task?.description ?? ""),
                 assignee: String(task?.assignee ?? ""),
                 isAi: Boolean(task?.isAi ?? false),
+                isBillable: defaultIsBillableForEditableScope(normalizedScopeType),
                 estimateHours: normalizedSeed.estimateHours,
                 billableHoursToday: Number(task?.billableHoursToday ?? 0),
                 status: normalizedSeed.status,
@@ -3050,6 +3059,7 @@ export async function createEditableTask(input: {
     description?: string;
     assignee?: string;
     isAi?: boolean;
+    isBillable?: boolean;
     estimateHours?: number;
     billableHoursToday?: number;
     status?: "backlog" | "open" | "closed";
@@ -3082,6 +3092,9 @@ export async function createEditableTask(input: {
             description: String(input.description ?? ""),
             assignee: String(input.assignee ?? ""),
             isAi: Boolean(input.isAi ?? false),
+            isBillable: typeof input.isBillable === "boolean"
+                ? input.isBillable
+                : defaultIsBillableForEditableScope(String(input.scopeType)),
             estimateHours: normalizedLifecycle.estimateHours,
             billableHoursToday: Number(input.billableHoursToday ?? 0),
             status,
@@ -3107,6 +3120,7 @@ export async function updateEditableTask(
         description: string;
         assignee: string;
         isAi: boolean;
+        isBillable: boolean;
         estimateHours: number;
         billableHoursToday: number;
         status: "backlog" | "open" | "closed";
@@ -3143,6 +3157,7 @@ export async function updateEditableTask(
     if (typeof data.description === "string") updateData.description = data.description;
     if (typeof data.assignee === "string") updateData.assignee = data.assignee;
     if (typeof data.isAi === "boolean") updateData.isAi = data.isAi;
+    if (typeof data.isBillable === "boolean") updateData.isBillable = data.isBillable;
     if (typeof data.estimateHours === "number" && Number.isFinite(data.estimateHours)) updateData.estimateHours = normalizedLifecycle.estimateHours;
     if (typeof data.billableHoursToday === "number" && Number.isFinite(data.billableHoursToday)) updateData.billableHoursToday = data.billableHoursToday;
     if (typeof data.status === "string") updateData.status = normalizedLifecycle.status;
@@ -3224,6 +3239,8 @@ export async function addEditableTaskBillableEntry(input: {
     entryDate: string;
     hours: number;
     note?: string;
+    /** When true, hours are non-billable (value-add) in NetSuite. */
+    isValueAdd?: boolean;
 }) {
     const taskBillableEntryModel = (prisma as any).taskBillableEntry;
     const editableTaskModel = (prisma as any).editableTask;
@@ -3234,12 +3251,22 @@ export async function addEditableTaskBillableEntry(input: {
     const hours = Number(input.hours ?? 0);
     if (!taskId || !entryDate || !Number.isFinite(hours)) return null;
 
+    const parentTask = await editableTaskModel.findUnique({
+        where: { id: taskId },
+        select: { isBillable: true },
+    });
+    const taskBillable = parentTask?.isBillable === undefined ? true : Boolean(parentTask.isBillable);
+    const isValueAdd = typeof input.isValueAdd === "boolean"
+        ? input.isValueAdd
+        : !taskBillable;
+
     const created = await taskBillableEntryModel.create({
         data: {
             taskId,
             entryDate,
             hours,
             note: String(input.note ?? ""),
+            isValueAdd,
         },
     });
 
@@ -3274,6 +3301,7 @@ export async function updateEditableTaskBillableEntry(
         note: string;
         hours: number;
         entryDate: string;
+        isValueAdd: boolean;
     }>
 ) {
     const taskBillableEntryModel = (prisma as any).taskBillableEntry;
@@ -3289,6 +3317,7 @@ export async function updateEditableTaskBillableEntry(
     if (typeof data.note === "string") updateData.note = data.note;
     if (typeof data.entryDate === "string" && data.entryDate.trim().length > 0) updateData.entryDate = data.entryDate.trim();
     if (typeof data.hours === "number" && Number.isFinite(data.hours)) updateData.hours = data.hours;
+    if (typeof data.isValueAdd === "boolean") updateData.isValueAdd = data.isValueAdd;
 
     const updated = await taskBillableEntryModel.update({
         where: { id: String(entryId) },

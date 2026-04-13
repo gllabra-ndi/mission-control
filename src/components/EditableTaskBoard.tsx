@@ -54,6 +54,8 @@ type EditableTaskFormState = {
     description: string;
     assignee: string;
     isAi: boolean;
+    /** When true, NetSuite time entries are billable unless the actuals line is marked value-add. */
+    isBillable: boolean;
     week: string;
     plannedWeek: string;
     closedDate: string;
@@ -67,6 +69,8 @@ type BillableEntryDraft = {
     entryDate: string;
     hours: string;
     note: string;
+    /** Maps to DB isValueAdd — when true, hours are non-billable in NetSuite. */
+    isValueAdd: boolean;
 };
 
 const STATUS_COLUMNS: Array<{ id: EditableStatus; label: string }> = [
@@ -76,6 +80,10 @@ const STATUS_COLUMNS: Array<{ id: EditableStatus; label: string }> = [
 ];
 
 const NEW_TASK_DRAFT_ID = "draft:new-task";
+
+function defaultBillableForTeamScope(_scopeType: EditableTaskBoardProps["scopeType"]): boolean {
+    return true;
+}
 
 function sanitizeDecimalDraft(value: string) {
     const sanitized = String(value || "").replace(/[^0-9.]/g, "");
@@ -246,6 +254,7 @@ export function EditableTaskBoard({
         entryDate: getDefaultBillableEntryDate(activeWeekStr),
         hours: "",
         note: "",
+        isValueAdd: false,
     });
     const [dragTaskId, setDragTaskId] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
@@ -301,6 +310,9 @@ export function EditableTaskBoard({
             setSelectedTaskId(null);
             return;
         }
+        const taskBillable = task.isBillable === undefined
+            ? defaultBillableForTeamScope(scopeType)
+            : Boolean(task.isBillable);
         setEditorState({
             id: task.id,
             isDraft: false,
@@ -308,6 +320,7 @@ export function EditableTaskBoard({
             description: task.description,
             assignee: task.assignee,
             isAi: Boolean(task.isAi ?? false),
+            isBillable: taskBillable,
             week: task.week,
             plannedWeek: task.plannedWeek || "",
             closedDate: task.closedDate || "",
@@ -320,8 +333,9 @@ export function EditableTaskBoard({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
             hours: "",
             note: "",
+            isValueAdd: !taskBillable,
         });
-    }, [selectedTaskId, boardTasks, activeWeekStr]);
+    }, [selectedTaskId, boardTasks, activeWeekStr, scopeType]);
 
     useEffect(() => {
         if (typeof window === "undefined") return;
@@ -385,6 +399,7 @@ export function EditableTaskBoard({
             description: "",
             assignee: String(initialAssigneeFilter ?? "").trim(),
             isAi: false,
+            isBillable: defaultBillableForTeamScope(scopeType),
             week: activeWeekStr,
             plannedWeek: "",
             closedDate: "",
@@ -459,6 +474,7 @@ export function EditableTaskBoard({
             description: editorState.description,
             assignee: editorState.assignee,
             isAi: editorState.isAi,
+            isBillable: editorState.isBillable,
             week: normalizedWeek,
             plannedWeek: normalizedPlannedWeek,
             closedDate: normalizedClosedDate,
@@ -538,6 +554,7 @@ export function EditableTaskBoard({
             entryDate: billableEntryDraft.entryDate,
             hours: normalizeEstimateHours(billableEntryDraft.hours),
             note: billableEntryDraft.note,
+            isValueAdd: billableEntryDraft.isValueAdd,
         });
         if (!created) return;
 
@@ -556,6 +573,7 @@ export function EditableTaskBoard({
             entryDate: getDefaultBillableEntryDate(activeWeekStr),
             hours: "",
             note: "",
+            isValueAdd: !Boolean(selectedTask.isBillable ?? defaultBillableForTeamScope(scopeType)),
         });
         await onWeekDataRefresh?.();
     };
@@ -577,6 +595,32 @@ export function EditableTaskBoard({
         if (editorState?.id === task.id) {
             setEditorState((prev) => prev ? { ...prev, isAi: nextValue } : prev);
         }
+    };
+
+    const handleToggleTaskBillable = (task: EditableTaskRecord, nextValue: boolean) => {
+        persistTaskUpdate(task.id, { isBillable: nextValue });
+        if (editorState?.id === task.id) {
+            setEditorState((prev) => prev ? { ...prev, isBillable: nextValue } : prev);
+            setBillableEntryDraft((draft) => ({
+                ...draft,
+                isValueAdd: !nextValue,
+            }));
+        }
+    };
+
+    const handleToggleEntryValueAdd = async (entry: EditableTaskBillableEntryRecord, nextIsValueAdd: boolean) => {
+        const updated = await updateEditableTaskBillableEntry(entry.id, { isValueAdd: nextIsValueAdd });
+        if (!updated) return;
+        setBoardTasks((prev) => prev.map((task) => {
+            if (task.id !== entry.taskId) return task;
+            return {
+                ...task,
+                billableEntries: (task.billableEntries || []).map((row) => (
+                    row.id === entry.id ? updated : row
+                )),
+            };
+        }));
+        await onWeekDataRefresh?.();
     };
 
     const handleAttachmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -718,6 +762,21 @@ export function EditableTaskBoard({
                 <div>
                     <div className="text-sm font-medium text-white">AI</div>
                     <div className="text-[11px] text-text-muted">Mark this task as AI-related work.</div>
+                </div>
+            </label>
+
+            <label className="flex items-center gap-3 rounded-md border border-border bg-background/40 px-3 py-2">
+                <input
+                    type="checkbox"
+                    checked={Boolean(editorState?.isBillable)}
+                    onChange={(event) => setEditorState((prev) => prev ? { ...prev, isBillable: event.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                />
+                <div>
+                    <div className="text-sm font-medium text-white">Billable</div>
+                    <div className="text-[11px] text-text-muted">
+                        Default for NetSuite time entries on this task. You can still mark individual actuals lines as non-billable (value-add).
+                    </div>
                 </div>
             </label>
 
@@ -908,6 +967,7 @@ export function EditableTaskBoard({
             <div className="space-y-4">
                 <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-text-muted">
                     Logged actuals here will roll up into Plan vs Actuals for this consultant and client.
+                    NetSuite receives the billable flag from the task default unless you mark a line as value-add (non-billable) below.
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-[160px_120px_minmax(0,1fr)_auto]">
@@ -964,6 +1024,22 @@ export function EditableTaskBoard({
                     </div>
                 </div>
 
+                <label className="flex items-center gap-3 rounded-md border border-border/60 bg-background/30 px-3 py-2">
+                    <input
+                        type="checkbox"
+                        checked={!billableEntryDraft.isValueAdd}
+                        onChange={(event) => setBillableEntryDraft((prev) => ({
+                            ...prev,
+                            isValueAdd: !event.target.checked,
+                        }))}
+                        className="h-4 w-4 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                    />
+                    <div>
+                        <div className="text-sm font-medium text-white">Billable in NetSuite</div>
+                        <div className="text-[11px] text-text-muted">Uncheck for value-add / non-billable hours on this line only.</div>
+                    </div>
+                </label>
+
                 <div className="rounded-xl border border-border/50 bg-background/30">
                     <div className="flex items-center justify-between border-b border-border/40 px-4 py-3">
                         <div>
@@ -1000,6 +1076,18 @@ export function EditableTaskBoard({
                                         <div className="mt-2 text-xs text-text-muted">
                                             {entry.note || "No note"}
                                         </div>
+                                        <label
+                                            className="mt-2 inline-flex items-center gap-2 text-xs text-text-muted"
+                                            onClick={(event) => event.stopPropagation()}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={!entry.isValueAdd}
+                                                onChange={(event) => void handleToggleEntryValueAdd(entry, !event.target.checked)}
+                                                className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                            />
+                                            <span>Billable in NetSuite</span>
+                                        </label>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1">
@@ -1237,18 +1325,32 @@ export function EditableTaskBoard({
                                                 </div>
                                                 <GripVertical className="w-4 h-4 text-text-muted shrink-0" />
                                             </div>
-                                            <label
-                                                className="mt-3 inline-flex items-center gap-2 text-xs text-text-muted"
-                                                onClick={(event) => event.stopPropagation()}
-                                            >
-                                                <input
-                                                    type="checkbox"
-                                                    checked={Boolean(task.isAi)}
-                                                    onChange={(event) => handleToggleTaskAi(task, event.target.checked)}
-                                                    className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
-                                                />
-                                                <span>AI</span>
-                                            </label>
+                                            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-muted">
+                                                <label
+                                                    className="inline-flex items-center gap-2"
+                                                    onClick={(event) => event.stopPropagation()}
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={Boolean(task.isAi)}
+                                                        onChange={(event) => handleToggleTaskAi(task, event.target.checked)}
+                                                        className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                                    />
+                                                    <span>AI</span>
+                                                </label>
+                                                <label
+                                                    className="inline-flex items-center gap-2"
+                                                    onClick={(event) => event.stopPropagation()}
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={task.isBillable !== false}
+                                                        onChange={(event) => handleToggleTaskBillable(task, event.target.checked)}
+                                                        className="h-3.5 w-3.5 rounded border-border bg-background/60 text-primary focus:ring-primary"
+                                                    />
+                                                    <span>Billable</span>
+                                                </label>
+                                            </div>
                                             <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-text-muted">
                                                 <span className="truncate">{task.assignee || "Unassigned"}</span>
                                                 <div className="flex items-center gap-3">
