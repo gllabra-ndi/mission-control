@@ -10,9 +10,10 @@ interface UserAccessSettingsProps {
     consultantDirectory: ConsultantRecord[];
     currentUserName: string;
     authEnabled: boolean;
+    canManageUsers: boolean;
 }
 
-export function UserAccessSettings({ initialUsers, consultantDirectory, currentUserName, authEnabled }: UserAccessSettingsProps) {
+export function UserAccessSettings({ initialUsers, consultantDirectory, currentUserName, authEnabled, canManageUsers }: UserAccessSettingsProps) {
     const router = useRouter();
     const [users, setUsers] = useState<AppUserRecord[]>(initialUsers);
     const [firstName, setFirstName] = useState("");
@@ -72,6 +73,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     }, [consultantDirectory, rosterMatchedUsers]);
 
     const handleInvite = () => {
+        if (!canManageUsers) return;
         setFeedback(null);
         setError(null);
         startTransition(async () => {
@@ -110,6 +112,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     };
 
     const handleRefreshRoster = () => {
+        if (!canManageUsers) return;
         setFeedback(null);
         setError(null);
         startTransition(async () => {
@@ -126,6 +129,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     };
 
     const handleRoleChange = (userId: string, nextRole: AppRole) => {
+        if (!canManageUsers) return;
         setFeedback(null);
         setError(null);
         startTransition(async () => {
@@ -143,6 +147,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     };
 
     const handleResendInvite = (userId: string) => {
+        if (!canManageUsers) return;
         setFeedback(null);
         setError(null);
         startTransition(async () => {
@@ -160,6 +165,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
     };
 
     const handleRemoveUser = (userId: string) => {
+        if (!canManageUsers) return;
         setFeedback(null);
         setError(null);
         startTransition(async () => {
@@ -178,6 +184,11 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
 
     return (
         <div className="mx-auto w-full max-w-6xl space-y-6">
+            {!canManageUsers && (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-6 py-4 text-sm text-amber-100">
+                    You can view settings, but you don’t have permission to manage users in this environment.
+                </div>
+            )}
             <section className="rounded-2xl border border-border/60 bg-surface/70 shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
                 <div className="border-b border-border/50 px-6 py-5">
                     <div className="flex items-center justify-between gap-3">
@@ -193,7 +204,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                         <button
                             type="button"
                             onClick={handleRefreshRoster}
-                            disabled={Boolean(actionUserId)}
+                            disabled={Boolean(actionUserId) || !canManageUsers}
                             className="inline-flex items-center gap-2 rounded-xl border border-border/60 bg-background/50 px-4 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-60"
                         >
                             <RefreshCcw className="h-4 w-4" />
@@ -207,21 +218,21 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                         <div className="grid gap-4 md:grid-cols-2">
                             <label className="block space-y-1">
                                 <span className="text-[11px] uppercase tracking-wider text-text-muted">First Name</span>
-                                <input value={firstName} onChange={(e) => setFirstName(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary" />
+                                <input disabled={!canManageUsers} value={firstName} onChange={(e) => setFirstName(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary disabled:opacity-60" />
                             </label>
                             <label className="block space-y-1">
                                 <span className="text-[11px] uppercase tracking-wider text-text-muted">Last Name</span>
-                                <input value={lastName} onChange={(e) => setLastName(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary" />
+                                <input disabled={!canManageUsers} value={lastName} onChange={(e) => setLastName(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary disabled:opacity-60" />
                             </label>
                         </div>
                         <div className="grid gap-4 md:grid-cols-[1.3fr,0.7fr]">
                             <label className="block space-y-1">
                                 <span className="text-[11px] uppercase tracking-wider text-text-muted">Email</span>
-                                <input value={email} onChange={(e) => setEmail(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary" />
+                                <input disabled={!canManageUsers} value={email} onChange={(e) => setEmail(e.target.value)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary disabled:opacity-60" />
                             </label>
                             <label className="block space-y-1">
                                 <span className="text-[11px] uppercase tracking-wider text-text-muted">Role</span>
-                                <select value={role} onChange={(e) => setRole(e.target.value as AppRole)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary">
+                                <select disabled={!canManageUsers} value={role} onChange={(e) => setRole(e.target.value as AppRole)} className="w-full rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary disabled:opacity-60">
                                     {APP_ROLE_ORDER.map((roleOption) => (
                                         <option key={roleOption} value={roleOption}>
                                             {ROLE_DEFINITIONS[roleOption].label}
@@ -233,7 +244,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                         <button
                             type="button"
                             onClick={handleInvite}
-                            disabled={Boolean(actionUserId) || !firstName.trim() || !lastName.trim() || !email.trim()}
+                            disabled={!canManageUsers || Boolean(actionUserId) || !firstName.trim() || !lastName.trim() || !email.trim()}
                             className="inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-primary/15 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-primary/25 disabled:opacity-60"
                         >
                             <UserPlus className="h-4 w-4" />
@@ -342,7 +353,8 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                                         <select
                                             value={user.role}
                                             onChange={(e) => handleRoleChange(user.id, e.target.value as AppRole)}
-                                            className="rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary"
+                                            disabled={!canManageUsers}
+                                            className="rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-white outline-none focus:border-primary disabled:opacity-60"
                                         >
                                             {APP_ROLE_ORDER.map((roleOption) => (
                                                 <option key={roleOption} value={roleOption}>
@@ -376,7 +388,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                                             <button
                                                 type="button"
                                                 onClick={() => handleResendInvite(user.id)}
-                                                disabled={Boolean(actionUserId && actionUserId !== user.id)}
+                                                disabled={!canManageUsers || Boolean(actionUserId && actionUserId !== user.id)}
                                                 className="inline-flex items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm text-text-main hover:bg-surface-hover disabled:opacity-60"
                                             >
                                                 {user.inviteAcceptedAt ? <RefreshCcw className="h-4 w-4" /> : <Mail className="h-4 w-4" />}
@@ -385,7 +397,7 @@ export function UserAccessSettings({ initialUsers, consultantDirectory, currentU
                                             <button
                                                 type="button"
                                                 onClick={() => handleRemoveUser(user.id)}
-                                                disabled={Boolean(actionUserId && actionUserId !== user.id)}
+                                                disabled={!canManageUsers || Boolean(actionUserId && actionUserId !== user.id)}
                                                 className="inline-flex items-center gap-2 rounded-md border border-red-500/35 px-3 py-2 text-sm text-red-100 hover:bg-red-500/10 disabled:opacity-60"
                                             >
                                                 <Trash2 className="h-4 w-4" />

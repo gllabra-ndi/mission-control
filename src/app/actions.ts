@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { addDays, addWeeks, format, startOfWeek } from "date-fns";
 import { APP_ROLE_ORDER, normalizeAppRole, ROLE_DEFINITIONS, type AppRole } from "@/lib/access";
+import { isAuthEnabled, requireAppSession } from "@/lib/auth";
 import { getInviteUrl, sendInviteEmail } from "@/lib/invite-email";
 import { STANDARD_CLIENT_ROLES } from "@/lib/clientRoles";
 import {
@@ -26,6 +27,16 @@ import {
     type AllocationSource,
     type SidebarSource,
 } from "@/lib/legacySources";
+
+async function requireSignedIn() {
+    if (!isAuthEnabled) return;
+    await requireAppSession();
+}
+
+async function requireManageUsers() {
+    if (!isAuthEnabled) return;
+    await requireAppSession();
+}
 
 export interface CapacityGridResource {
     id: string;
@@ -1731,6 +1742,7 @@ export async function getConsultants(): Promise<ConsultantRecord[]> {
 }
 
 export async function syncConsultantsAndUsers(): Promise<ConsultantRecord[]> {
+    await requireManageUsers();
     return await getConsultantUtilizationDirectory();
 }
 
@@ -1974,6 +1986,7 @@ async function issueAppUserInvite(row: any, inviterName: string) {
 }
 
 export async function getAppUsers(consultantsInput?: ConsultantRecord[]): Promise<AppUserRecord[]> {
+    await requireSignedIn();
     const rows = await prisma.appUser.findMany({
         orderBy: [
             { createdAt: "asc" },
@@ -2100,6 +2113,7 @@ async function updateConsultantRosterRemovalState(input: {
 }
 
 export async function deactivateProvisionedUser(userId: string, week?: string) {
+    await requireManageUsers();
     const user = await prisma.appUser.findUnique({
         where: { id: String(userId) },
     });
@@ -2146,6 +2160,7 @@ export async function deactivateConsultantFromUtilization(input: {
     consultantEmail?: string;
     resourceId?: string;
 }) {
+    await requireManageUsers();
     const week = String(input.week || "").trim() || getCurrentWeekStartKey();
     const consultantId = Number(input.consultantId ?? 0);
     if (!consultantId) {
@@ -2182,6 +2197,7 @@ export async function inviteAppUser(input: {
     role: AppRole;
     inviterName?: string;
 }) {
+    await requireManageUsers();
     const firstName = String(input.firstName || "").trim();
     const lastName = String(input.lastName || "").trim();
     const email = normalizeEmail(input.email);
@@ -2233,6 +2249,7 @@ export async function inviteAppUser(input: {
 }
 
 export async function resendAppUserInvite(userId: string, inviterName?: string) {
+    await requireManageUsers();
     const user = await prisma.appUser.findUnique({
         where: { id: String(userId) },
     });
@@ -2245,6 +2262,7 @@ export async function resendAppUserInvite(userId: string, inviterName?: string) 
 }
 
 export async function updateAppUserRole(userId: string, role: AppRole) {
+    await requireManageUsers();
     const updated = await prisma.appUser.update({
         where: { id: String(userId) },
         data: {

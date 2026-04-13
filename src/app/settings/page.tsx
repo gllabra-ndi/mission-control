@@ -1,12 +1,13 @@
 import { getAppUsers, getConsultantUtilizationDirectory } from "@/app/actions";
 import { UserAccessSettings } from "@/components/UserAccessSettings";
-import { getAppSession, isAuthEnabled, requireAdminSession } from "@/lib/auth";
+import { getAppSession, isAuthEnabled, requireAppSession } from "@/lib/auth";
 import Link from "next/link";
 
 export default async function SettingsPage() {
     if (isAuthEnabled) {
-        await requireAdminSession();
+        await requireAppSession();
     }
+    const canManageUsers = true;
 
     const consultantRoster = await getConsultantUtilizationDirectory();
 
@@ -42,6 +43,7 @@ export default async function SettingsPage() {
                 consultantDirectory={consultantRoster}
                 currentUserName={currentUserName}
                 authEnabled={isAuthEnabled}
+                canManageUsers={canManageUsers}
             />
         </main>
     );
