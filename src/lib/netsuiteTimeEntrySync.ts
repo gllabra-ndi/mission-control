@@ -1,0 +1,266 @@
+import "server-only";
+
+import { prisma } from "@/lib/prisma";
+import {
+    createNetSuiteTimeEntry,
+    updateNetSuiteTimeEntry,
+    type NetSuiteCreateTimeEntryInput,
+    type NetSuiteUpdateTimeEntryInput,
+} from "@/lib/netsuite";
+
+// ---------------------------------------------------------------------------
+// Kill switch
+// ---------------------------------------------------------------------------
+
+export function isTimeEntrySyncEnabled(): boolean {
+    return process.env.NETSUITE_TIME_SYNC_ENABLED === "true";
+}
+
+// ---------------------------------------------------------------------------
+// Error sanitization — strip URLs and cap length for safe persistence
+// ---------------------------------------------------------------------------
+
+function stripUrlsAndCap(raw: string): string {
+    return raw.replace(/https?:\/\/[^\s]+/g, "[url]").slice(0, 500);
+}
+
+// ---------------------------------------------------------------------------
+// Employee resolver — maps an assignee string to a Consultant email
+// ---------------------------------------------------------------------------
+
+export async function resolveConsultantEmailForAssignee(
+    assignee: string
+): Promise<string | null> {
+    const trimmed = String(assignee || "").trim();
+    if (!trimmed) return null;
+
+    const consultantModel = (prisma as any).consultant;
+    if (!consultantModel) return null;
+
+    // 1. Exact email match
+    try {
+        const byEmail = await consultantModel.findFirst({
+            where: { email: trimmed.toLowerCase() },
+            orderBy: { id: "asc" },
+        });
+        if (byEmail) return String(byEmail.email);
+    } catch {
+        // continue to next strategy
+    }
+
+    // 2. First + last name match (only if assignee contains a space)
+    if (trimmed.includes(" ")) {
+        try {
+            const parts = trimmed.split(/\s+/);
+            const firstName = parts.slice(0, -1).join(" ");
+            const lastName = parts[parts.length - 1];
+            const byName = await consultantModel.findFirst({
+                where: {
+                    firstName: { equals: firstName, mode: "insensitive" },
+                    lastName: { equals: lastName, mode: "insensitive" },
+                },
+                orderBy: { id: "asc" },
+            });
+            if (byName) return String(byName.email);
+        } catch {
+            // continue to next strategy
+        }
+    }
+
+    // 3. External ID match
+    try {
+        const byExternalId = await consultantModel.findFirst({
+            where: { externalId: trimmed },
+            orderBy: { id: "asc" },
+        });
+        if (byExternalId) return String(byExternalId.email);
+    } catch {
+        // continue — return null below
+    }
+
+    // 4. Single-token names: DO NOT fuzzy-match. Return null to surface ambiguity.
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// Sync result types
+// ---------------------------------------------------------------------------
+
+export interface TimeEntrySyncResult {
+    success: boolean;
+    dryRun?: boolean;
+    error?: string;
+    netsuiteId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Core sync function
+// ---------------------------------------------------------------------------
+
+export async function syncTimeEntryToNetSuite(
+    entryId: string,
+    mode: "create" | "update"
+): Promise<TimeEntrySyncResult> {
+    const taskBillableEntryModel = (prisma as any).taskBillableEntry;
+    const editableTaskModel = (prisma as any).editableTask;
+
+    // Kill switch — dry-run when disabled (works even without NS env vars)
+    if (!isTimeEntrySyncEnabled()) {
+        console.info(
+            "[netsuite:time-entry:dry-run]",
+            JSON.stringify({ entryId, mode })
+        );
+        return { dryRun: true, success: true };
+    }
+
+    try {
+        if (!taskBillableEntryModel || !editableTaskModel) {
+            return { success: false, error: "prisma_models_unavailable" };
+        }
+
+        // Fresh read — race-safety critical
+        const entry = await taskBillableEntryModel.findUnique({
+            where: { id: String(entryId) },
+        });
+        if (!entry) {
+            return { success: false, error: "entry_not_found" };
+        }
+
+        // Read related task for assignee
+        const task = await editableTaskModel.findUnique({
+            where: { id: String(entry.taskId) },
+        });
+        if (!task) {
+            return { success: false, error: "task_not_found" };
+        }
+
+        // Resolve employee
+        const employeeEmail = await resolveConsultantEmailForAssignee(
+            String(task.assignee || "")
+        );
+        if (!employeeEmail) {
+            // Mark as failed so it can be retried after consultant mapping is fixed
+            await taskBillableEntryModel.update({
+                where: { id: String(entryId) },
+                data: {
+                    nsSyncStatus: "failed",
+                    nsSyncError: "employee_not_resolved",
+                },
+            });
+            return { success: false, error: "employee_not_resolved" };
+        }
+
+        const hours = Number(entry.hours ?? 0);
+        const entryDate = String(entry.entryDate || "");
+        const memo = String(entry.note || "");
+        const isBillable = !Boolean(entry.isValueAdd);
+        const externalId = String(entry.id);
+
+        if (mode === "create") {
+            const input: NetSuiteCreateTimeEntryInput = {
+                externalId,
+                hours,
+                date: entryDate,
+                memo,
+                isBillable,
+                employeeEmail,
+            };
+
+            const result = await createNetSuiteTimeEntry(input);
+
+            if (result.ok && result.data) {
+                await taskBillableEntryModel.update({
+                    where: { id: String(entryId) },
+                    data: {
+                        netsuiteId: String(result.data.timeBillId),
+                        nsSyncStatus: "synced",
+                        nsSyncedAt: new Date(),
+                        nsSyncError: null,
+                    },
+                });
+                return {
+                    success: true,
+                    netsuiteId: String(result.data.timeBillId),
+                };
+            }
+
+            // Failure path
+            const errorMsg = stripUrlsAndCap(
+                String(result.error || result.message || "unknown_create_error")
+            );
+            await taskBillableEntryModel.update({
+                where: { id: String(entryId) },
+                data: {
+                    nsSyncStatus: "failed",
+                    nsSyncError: errorMsg,
+                },
+            });
+            return { success: false, error: errorMsg };
+        }
+
+        // mode === "update"
+        const updateInput: NetSuiteUpdateTimeEntryInput = {
+            externalId,
+            hours,
+            date: entryDate,
+            memo,
+            isBillable,
+        };
+
+        const result = await updateNetSuiteTimeEntry(updateInput);
+
+        if (result.ok && result.data) {
+            await taskBillableEntryModel.update({
+                where: { id: String(entryId) },
+                data: {
+                    netsuiteId: String(result.data.timeBillId),
+                    nsSyncStatus: "synced",
+                    nsSyncedAt: new Date(),
+                    nsSyncError: null,
+                },
+            });
+            return {
+                success: true,
+                netsuiteId: String(result.data.timeBillId),
+            };
+        }
+
+        const errorMsg = stripUrlsAndCap(
+            String(result.error || result.message || "unknown_update_error")
+        );
+        await taskBillableEntryModel.update({
+            where: { id: String(entryId) },
+            data: {
+                nsSyncStatus: "failed",
+                nsSyncError: errorMsg,
+            },
+        });
+        return { success: false, error: errorMsg };
+    } catch (err: any) {
+        const safeMsg = stripUrlsAndCap(
+            String(err?.message || "unknown_sync_error")
+        );
+        console.info(
+            "[netsuite:time-entry:sync-error]",
+            entryId,
+            safeMsg
+        );
+
+        // Best-effort status update — don't let this throw either
+        try {
+            if (taskBillableEntryModel) {
+                await taskBillableEntryModel.update({
+                    where: { id: String(entryId) },
+                    data: {
+                        nsSyncStatus: "failed",
+                        nsSyncError: safeMsg,
+                    },
+                });
+            }
+        } catch {
+            // swallow — outer catch already logged
+        }
+
+        return { success: false, error: safeMsg };
+    }
+}

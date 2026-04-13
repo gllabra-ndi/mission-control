@@ -158,15 +158,19 @@ model TaskAttachment {
 }
 
 model TaskBillableEntry {
-  id        String   @id @default(cuid())
-  taskId     String
-  entryDate String
-  hours     Float    @default(0)
-  note      String   @default("")
-  isValueAdd Boolean @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  task      EditableTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  id           String    @id @default(cuid())
+  taskId       String
+  entryDate    String
+  hours        Float     @default(0)
+  note         String    @default("")
+  isValueAdd   Boolean   @default(false)
+  netsuiteId   String?
+  nsSyncStatus String    @default("pending")
+  nsSyncedAt   DateTime?
+  nsSyncError  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  task         EditableTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId, entryDate])
   @@index([entryDate, taskId], map: "task_billable_entry_date_task_idx")

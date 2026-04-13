@@ -20,6 +20,7 @@ import {
     normalizeEstimateHours,
     normalizeWeekKey,
 } from "@/lib/editableTaskLifecycle";
+import { syncTimeEntryToNetSuite } from "@/lib/netsuiteTimeEntrySync";
 import {
     normalizeAllocationSource,
     normalizeSidebarSource,
@@ -3198,6 +3199,9 @@ export async function addEditableTaskBillableEntry(input: {
         },
     });
 
+    // NetSuite sync — fire and record, never roll back Prisma on NS failure
+    await syncTimeEntryToNetSuite(String(created.id), "create").catch(() => undefined);
+
     revalidatePath("/");
     return mapEditableTaskBillableEntry(created);
 }
@@ -3247,6 +3251,22 @@ export async function updateEditableTaskBillableEntry(
         },
     });
 
+    // NetSuite sync — fresh-read for race safety, then decide create vs update
+    try {
+        const freshEntry = await taskBillableEntryModel.findUnique({
+            where: { id: String(entryId) },
+        });
+        if (freshEntry) {
+            const syncMode =
+                String(freshEntry.nsSyncStatus) === "synced" && freshEntry.netsuiteId
+                    ? "update" as const
+                    : "create" as const;
+            await syncTimeEntryToNetSuite(String(entryId), syncMode).catch(() => undefined);
+        }
+    } catch {
+        // Never fail the update action due to sync issues
+    }
+
     revalidatePath("/");
     return mapEditableTaskBillableEntry(updated);
 }
@@ -3260,6 +3280,11 @@ export async function deleteEditableTaskBillableEntry(entryId: string) {
         where: { id: String(entryId) },
     });
     if (!existing) return;
+
+    // Delete guard — RESTlet has no delete action; block deletion of synced entries
+    if (String(existing.nsSyncStatus) === "synced" && existing.netsuiteId) {
+        return;
+    }
 
     await taskBillableEntryModel.delete({
         where: { id: String(entryId) },
