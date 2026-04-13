@@ -86,18 +86,12 @@ export async function resolveConsultantEmailForAssignee(
 // Customer resolver — maps a task's scope to a NetSuite project internal ID
 // ---------------------------------------------------------------------------
 
-async function resolveCustomerForTask(task: {
-    scopeType?: string;
-    scopeId?: string;
-}): Promise<number | null> {
-    if (!task || String(task.scopeType || "") !== "client") return null;
-    const scopeId = String(task.scopeId || "").trim();
-    if (!scopeId) return null;
+async function resolveNetSuiteProjectId(clientId: string): Promise<number | null> {
     const clientModel = (prisma as any).clientDirectory;
     if (!clientModel) return null;
     try {
         const client = await clientModel.findUnique({
-            where: { id: scopeId },
+            where: { id: clientId },
             select: { netsuiteProjectId: true },
         });
         const raw = String(client?.netsuiteProjectId || "").trim();
@@ -107,6 +101,41 @@ async function resolveCustomerForTask(task: {
     } catch {
         return null;
     }
+}
+
+async function resolveCustomerForTask(task: {
+    scopeType?: string;
+    scopeId?: string;
+}): Promise<number | null> {
+    if (!task) return null;
+    const scopeType = String(task.scopeType || "").trim();
+    const scopeId = String(task.scopeId || "").trim();
+    if (!scopeId) return null;
+
+    // Direct client scope — scopeId IS the ClientDirectory.id
+    if (scopeType === "client") {
+        return resolveNetSuiteProjectId(scopeId);
+    }
+
+    // List or folder scope — resolve via TaskSidebarBoardPlacement
+    if (scopeType === "list" || scopeType === "folder") {
+        const placementModel = (prisma as any).taskSidebarBoardPlacement;
+        if (!placementModel) return null;
+        try {
+            const placement = await placementModel.findFirst({
+                where: { boardId: scopeId },
+                select: { clientId: true },
+                orderBy: { orderIndex: "asc" },
+            });
+            const clientId = String(placement?.clientId || "").trim();
+            if (!clientId) return null;
+            return resolveNetSuiteProjectId(clientId);
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
 }
 
 // ---------------------------------------------------------------------------
