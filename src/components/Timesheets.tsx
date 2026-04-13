@@ -238,6 +238,18 @@ export function Timesheets({
             .sort((a, b) => a.subject.localeCompare(b.subject));
     }, [editableTasks, selectedConsultant, weekDateKeys]);
 
+    const syncFailureCounts = useMemo(() => {
+        let failed = 0;
+        let pending = 0;
+        editableTasks.forEach((task) => {
+            (task.billableEntries || []).forEach((entry) => {
+                if (entry.nsSyncStatus === "failed") failed++;
+                else if (entry.nsSyncStatus === "pending") pending++;
+            });
+        });
+        return { failed, pending };
+    }, [editableTasks]);
+
     const capacityRows = useMemo(
         () => Array.isArray(capacityGrid?.rows) ? capacityGrid.rows : [],
         [capacityGrid]
@@ -597,6 +609,14 @@ export function Timesheets({
 
     return (
         <section className="flex flex-col gap-6">
+            {syncFailureCounts.failed > 0 && (
+                <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-400">
+                    <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
+                    <span>
+                        {syncFailureCounts.failed} time {syncFailureCounts.failed === 1 ? "entry" : "entries"} failed to sync to NetSuite
+                    </span>
+                </div>
+            )}
             <div className="flex items-center justify-between gap-3 flex-wrap rounded-[24px] border border-border/50 bg-[linear-gradient(180deg,rgba(21,26,43,0.96)_0%,rgba(13,18,29,0.96)_100%)] px-5 py-4 shadow-[0_20px_60px_rgba(0,0,0,0.28)]">
                 <div className="flex items-center gap-4 flex-wrap">
                     <h2 className="text-sm font-medium text-text-main flex items-center gap-2">

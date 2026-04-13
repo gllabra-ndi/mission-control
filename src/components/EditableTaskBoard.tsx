@@ -975,26 +975,51 @@ export function EditableTaskBoard({
                         {entries.length === 0 && (
                             <div className="px-4 py-8 text-sm text-text-muted">No actuals entries logged yet for this task.</div>
                         )}
-                        {entries.map((entry) => (
+                        {entries.map((entry) => {
+                            const isSyncLocked = entry.nsSyncStatus === "synced" && !!entry.netsuiteId;
+                            return (
                             <div key={entry.id} className="flex items-start justify-between gap-3 px-4 py-3">
-                                <div className="min-w-0">
-                                    <div className="text-sm font-medium text-white">
-                                        {entry.hours.toFixed(2)}h on {format(new Date(`${entry.entryDate}T00:00:00`), "MMM d, yyyy")}
-                                    </div>
-                                    <div className="mt-2 text-xs text-text-muted">
-                                        {entry.note || "No note"}
+                                <div className="flex items-start gap-2 min-w-0">
+                                    <span
+                                        className={cn(
+                                            "mt-1 h-2 w-2 shrink-0 rounded-full",
+                                            entry.nsSyncStatus === "synced" ? "bg-green-500" :
+                                            entry.nsSyncStatus === "failed" ? "bg-red-500" :
+                                            "bg-gray-500"
+                                        )}
+                                        title={
+                                            entry.nsSyncStatus === "synced" ? `Synced to NetSuite (${entry.netsuiteId})` :
+                                            entry.nsSyncStatus === "failed" ? `Sync failed: ${entry.nsSyncError || "unknown error"}` :
+                                            "Pending sync"
+                                        }
+                                    />
+                                    <div className="min-w-0">
+                                        <div className="text-sm font-medium text-white">
+                                            {entry.hours.toFixed(2)}h on {format(new Date(`${entry.entryDate}T00:00:00`), "MMM d, yyyy")}
+                                        </div>
+                                        <div className="mt-2 text-xs text-text-muted">
+                                            {entry.note || "No note"}
+                                        </div>
                                     </div>
                                 </div>
                                 <button
                                     type="button"
+                                    disabled={isSyncLocked}
                                     onClick={() => handleDeleteBillableEntry(entry)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-red-500/30 px-2 py-1 text-xs text-red-200 hover:bg-red-500/10"
+                                    title={isSyncLocked ? "Cannot delete entries synced to NetSuite" : undefined}
+                                    className={cn(
+                                        "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
+                                        isSyncLocked
+                                            ? "border-border/40 text-text-muted opacity-50 cursor-not-allowed"
+                                            : "border-red-500/30 text-red-200 hover:bg-red-500/10"
+                                    )}
                                 >
                                     <Trash2 className="w-3.5 h-3.5" />
                                     Delete
                                 </button>
                             </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             </div>

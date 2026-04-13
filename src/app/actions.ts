@@ -254,6 +254,9 @@ export interface EditableTaskBillableEntryRecord {
     hours: number;
     note: string;
     isValueAdd: boolean;
+    nsSyncStatus: string;
+    nsSyncError: string | null;
+    netsuiteId: string | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -748,6 +751,9 @@ function mapEditableTaskBillableEntry(row: any): EditableTaskBillableEntryRecord
         hours: Number(row.hours ?? 0),
         note: String(row.note ?? ""),
         isValueAdd: Boolean(row.isValueAdd ?? false),
+        nsSyncStatus: String(row.nsSyncStatus ?? "pending"),
+        nsSyncError: row.nsSyncError ? String(row.nsSyncError) : null,
+        netsuiteId: row.netsuiteId ? String(row.netsuiteId) : null,
         createdAt: new Date(row.createdAt).toISOString(),
         updatedAt: new Date(row.updatedAt).toISOString(),
     };
