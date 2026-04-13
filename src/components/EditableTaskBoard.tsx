@@ -1002,21 +1002,36 @@ export function EditableTaskBoard({
                                         </div>
                                     </div>
                                 </div>
-                                <button
-                                    type="button"
-                                    disabled={isSyncLocked}
-                                    onClick={() => handleDeleteBillableEntry(entry)}
-                                    title={isSyncLocked ? "Cannot delete entries synced to NetSuite" : undefined}
-                                    className={cn(
-                                        "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                                        isSyncLocked
-                                            ? "border-border/40 text-text-muted opacity-50 cursor-not-allowed"
-                                            : "border-red-500/30 text-red-200 hover:bg-red-500/10"
+                                <div className="flex items-center gap-1">
+                                    {entry.nsSyncStatus === "failed" && (
+                                        <button
+                                            type="button"
+                                            onClick={async () => {
+                                                const { retryTimeEntrySync } = await import("@/app/actions");
+                                                await retryTimeEntrySync(entry.id);
+                                            }}
+                                            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-amber-400 hover:bg-amber-500/10 transition-colors"
+                                            title={`Retry sync (${entry.nsSyncError || "failed"})`}
+                                        >
+                                            ↻ Retry
+                                        </button>
                                     )}
-                                >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    Delete
-                                </button>
+                                    <button
+                                        type="button"
+                                        disabled={isSyncLocked}
+                                        onClick={() => handleDeleteBillableEntry(entry)}
+                                        title={isSyncLocked ? "Cannot delete entries synced to NetSuite" : undefined}
+                                        className={cn(
+                                            "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
+                                            isSyncLocked
+                                                ? "border-border/40 text-text-muted opacity-50 cursor-not-allowed"
+                                                : "border-red-500/30 text-red-200 hover:bg-red-500/10"
+                                        )}
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        Delete
+                                    </button>
+                                </div>
                             </div>
                             );
                         })}

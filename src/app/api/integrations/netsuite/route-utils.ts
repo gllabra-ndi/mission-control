@@ -18,6 +18,6 @@ export function getNetSuiteSyncTokenFromRequest(request: NextRequest): string {
 
 export function isNetSuiteSyncAuthorized(request: NextRequest): boolean {
     const expected = normalizeToken(process.env.NETSUITE_SYNC_TOKEN);
-    if (!expected) return true;
+    if (!expected) return false;
     return getNetSuiteSyncTokenFromRequest(request) === expected;
 }

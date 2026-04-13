@@ -4096,3 +4096,11 @@ export async function removeTaskSidebarFolder(folderId: string) {
 
     await hideTaskSidebarFolder(trimmed);
 }
+
+export async function retryTimeEntrySync(entryId: string) {
+    "use server";
+    const { syncTimeEntryToNetSuite: syncFn } = await import("@/lib/netsuiteTimeEntrySync");
+    const result = await syncFn(String(entryId), "create");
+    revalidatePath("/");
+    return result;
+}
