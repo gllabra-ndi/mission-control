@@ -49,7 +49,7 @@ export async function resolveConsultantEmailForAssignee(
         // continue to next strategy
     }
 
-    // 2. First + last name match (only if assignee contains a space)
+    // 2. First + last name exact match (only if assignee contains a space)
     if (trimmed.includes(" ")) {
         try {
             const parts = trimmed.split(/\s+/);
@@ -68,7 +68,50 @@ export async function resolveConsultantEmailForAssignee(
         }
     }
 
-    // 3. External ID match
+    // 3. Email prefix match — "Scott Lee" matches "scott.lee@..."
+    if (trimmed.includes(" ")) {
+        try {
+            const parts = trimmed.toLowerCase().split(/\s+/);
+            const allConsultants = await consultantModel.findMany({
+                select: { email: true },
+                orderBy: { id: "asc" },
+            });
+            for (const c of allConsultants) {
+                const email = String(c.email || "").toLowerCase();
+                const prefix = email.split("@")[0] || "";
+                // Match "scott.lee" against assignee "Scott Lee"
+                const prefixParts = prefix.split(/[._-]/);
+                if (prefixParts.length >= 2 && parts.length >= 2) {
+                    if (prefixParts[0] === parts[0] && prefixParts[1] === parts[parts.length - 1]) {
+                        return email;
+                    }
+                }
+            }
+        } catch {
+            // continue to next strategy
+        }
+    }
+
+    // 4. firstName match + lastName startsWith (handles "Lee" vs "Lee New")
+    if (trimmed.includes(" ")) {
+        try {
+            const parts = trimmed.split(/\s+/);
+            const firstName = parts.slice(0, -1).join(" ");
+            const lastName = parts[parts.length - 1];
+            const byPartialLast = await consultantModel.findFirst({
+                where: {
+                    firstName: { equals: firstName, mode: "insensitive" },
+                    lastName: { startsWith: lastName, mode: "insensitive" },
+                },
+                orderBy: { id: "asc" },
+            });
+            if (byPartialLast) return String(byPartialLast.email);
+        } catch {
+            // continue to next strategy
+        }
+    }
+
+    // 5. External ID match
     try {
         const byExternalId = await consultantModel.findFirst({
             where: { externalId: trimmed },
@@ -79,7 +122,7 @@ export async function resolveConsultantEmailForAssignee(
         // continue — return null below
     }
 
-    // 4. Single-token names: DO NOT fuzzy-match. Return null to surface ambiguity.
+    // 6. Single-token names: DO NOT fuzzy-match. Return null to surface ambiguity.
     return null;
 }
 
