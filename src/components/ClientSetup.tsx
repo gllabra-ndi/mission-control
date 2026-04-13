@@ -330,7 +330,9 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                     <table className="min-w-full text-sm">
                         <thead className="border-b border-border/40 bg-[#111626]/90 text-left text-[11px] uppercase tracking-[0.18em] text-text-muted">
                                 <tr>
-                                    <th className="px-4 py-3">Client</th>
+                                    <th className="sticky left-0 z-20 bg-[#111626]/95 px-4 py-3 shadow-[10px_0_24px_rgba(6,10,18,0.42)]">
+                                        Client
+                                    </th>
                                     <th className="px-4 py-3">Team</th>
                                     <th className="px-4 py-3">SA</th>
                                     <th className="px-4 py-3">Deal Type</th>
@@ -347,7 +349,12 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                         <tbody>
                             {orderedClients.map((client, index) => (
                                 <tr data-client-row={client.id} key={client.id} className={cn("border-b border-border/30", index % 2 === 0 ? "bg-white/[0.01]" : "bg-white/[0.03]")}>
-                                    <td className="px-4 py-3">
+                                    <td
+                                        className={cn(
+                                            "sticky left-0 z-10 px-4 py-3 shadow-[10px_0_24px_rgba(6,10,18,0.32)]",
+                                            index % 2 === 0 ? "bg-[#151b2a]" : "bg-[#182031]"
+                                        )}
+                                    >
                                         <input
                                             value={client.name}
                                             onChange={(event) => handleFieldChange(client.id, { name: event.target.value })}
@@ -403,7 +410,7 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                             value={client.netsuiteProjectName}
                                             onChange={(event) => handleFieldChange(client.id, { netsuiteProjectName: event.target.value })}
                                             className="w-64 rounded-lg border border-border/60 bg-background/50 px-3 py-2 text-sm text-white outline-none focus:border-primary"
-                                            placeholder="Reimagine Office Furnishings"
+                                            placeholder="NetSuite project name"
                                         />
                                     </td>
                                     <td className="px-4 py-3">
@@ -411,7 +418,7 @@ export function ClientSetup({ initialClients, onClientsChange }: ClientSetupProp
                                             value={client.netsuiteProjectId}
                                             onChange={(event) => handleFieldChange(client.id, { netsuiteProjectId: event.target.value })}
                                             className="w-28 rounded-lg border border-border/60 bg-background/50 px-3 py-2 text-sm text-white outline-none focus:border-primary"
-                                            placeholder="328531"
+                                            placeholder="NetSuite internal ID"
                                         />
                                     </td>
                                     <td className="px-4 py-3">
