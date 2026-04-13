@@ -83,6 +83,45 @@ export async function resolveConsultantEmailForAssignee(
 }
 
 // ---------------------------------------------------------------------------
+// Customer resolver — maps a task's scope to a NetSuite project internal ID
+// ---------------------------------------------------------------------------
+
+async function resolveCustomerForTask(task: {
+    scopeType?: string;
+    scopeId?: string;
+}): Promise<number | null> {
+    if (!task || String(task.scopeType || "") !== "client") return null;
+    const scopeId = String(task.scopeId || "").trim();
+    if (!scopeId) return null;
+    const clientModel = (prisma as any).clientDirectory;
+    if (!clientModel) return null;
+    try {
+        const client = await clientModel.findUnique({
+            where: { id: scopeId },
+            select: { netsuiteProjectId: true },
+        });
+        const raw = String(client?.netsuiteProjectId || "").trim();
+        if (!raw) return null;
+        const parsed = Number(raw);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service item resolver — AI vs standard based on task flag
+// ---------------------------------------------------------------------------
+
+function resolveServiceItemForTask(task: { isAi?: boolean }): number {
+    const aiItem = Number(process.env.NETSUITE_AI_SERVICE_ITEM || "124");
+    const defaultItem = Number(
+        process.env.NETSUITE_DEFAULT_SERVICE_ITEM || "17"
+    );
+    return task?.isAi ? aiItem : defaultItem;
+}
+
+// ---------------------------------------------------------------------------
 // Sync result types
 // ---------------------------------------------------------------------------
 
@@ -150,6 +189,23 @@ export async function syncTimeEntryToNetSuite(
             return { success: false, error: "employee_not_resolved" };
         }
 
+        // Resolve customer (NetSuite project internal ID) from task scope
+        const customer = await resolveCustomerForTask(task);
+        if (!customer) {
+            // Block sync — time bills require a customer. Mark failed with clear reason.
+            await taskBillableEntryModel.update({
+                where: { id: String(entryId) },
+                data: {
+                    nsSyncStatus: "failed",
+                    nsSyncError: "no_client_mapping",
+                },
+            });
+            return { success: false, error: "no_client_mapping" };
+        }
+
+        // Resolve service item (AI vs default based on task flag)
+        const item = resolveServiceItemForTask(task);
+
         const hours = Number(entry.hours ?? 0);
         const entryDate = String(entry.entryDate || "");
         const memo = String(entry.note || "");
@@ -164,6 +220,8 @@ export async function syncTimeEntryToNetSuite(
                 memo,
                 isBillable,
                 employeeEmail,
+                customer,
+                item,
             };
 
             const result = await createNetSuiteTimeEntry(input);
@@ -205,6 +263,8 @@ export async function syncTimeEntryToNetSuite(
             date: entryDate,
             memo,
             isBillable,
+            customer,
+            item,
         };
 
         const result = await updateNetSuiteTimeEntry(updateInput);
